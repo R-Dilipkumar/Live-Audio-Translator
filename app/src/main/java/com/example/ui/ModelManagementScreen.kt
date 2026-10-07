@@ -209,60 +209,43 @@ fun ModelManagementScreen(
                 }
             }
 
-            // Categorized ASR Models
-            val multilingualModels = availableAsrModels.filter { it.isMultilingual }
-            val monolingualModels = availableAsrModels.filter { !it.isMultilingual }
+            // Categorized ASR Models by Language & Tier
+            val languages = listOf(
+                "Multilingual / Auto-Detect" to availableAsrModels.filter { it.isMultilingual },
+                "Japanese (Anime & Gaming)" to availableAsrModels.filter { it.languageCode == "ja" },
+                "English" to availableAsrModels.filter { it.languageCode == "en" },
+                "Spanish" to availableAsrModels.filter { it.languageCode == "es" },
+                "Chinese (Mandarin)" to availableAsrModels.filter { it.languageCode == "zh" },
+                "Korean" to availableAsrModels.filter { it.languageCode == "ko" }
+            )
 
-            // Group: Multilingual / Auto-Detect
-            item {
-                Text(
-                    text = "Multilingual / Auto-Detect",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = 2.dp)
-                )
-            }
+            languages.forEach { (langTitle, models) ->
+                if (models.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = langTitle,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
+                        )
+                    }
 
-            items(multilingualModels) { model ->
-                AsrModelItemCard(
-                    model = model,
-                    isSelected = model.id == selectedAsrModel.id,
-                    isReady = viewModel.isAsrModelReady(model),
-                    downloadState = if (model.id == selectedAsrModel.id) asrState else ModelDownloadState.NotDownloaded,
-                    onSelect = { viewModel.selectAsrModel(model) },
-                    onDownload = {
-                        viewModel.selectAsrModel(model)
-                        viewModel.downloadAsrModel(model)
-                    },
-                    onDelete = { viewModel.deleteAsrModel(model) }
-                )
-            }
-
-            // Group: Monolingual Models
-            item {
-                Text(
-                    text = "Monolingual Low-Latency Models",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
-                )
-            }
-
-            items(monolingualModels) { model ->
-                AsrModelItemCard(
-                    model = model,
-                    isSelected = model.id == selectedAsrModel.id,
-                    isReady = viewModel.isAsrModelReady(model),
-                    downloadState = if (model.id == selectedAsrModel.id) asrState else ModelDownloadState.NotDownloaded,
-                    onSelect = { viewModel.selectAsrModel(model) },
-                    onDownload = {
-                        viewModel.selectAsrModel(model)
-                        viewModel.downloadAsrModel(model)
-                    },
-                    onDelete = { viewModel.deleteAsrModel(model) }
-                )
+                    items(models) { model ->
+                        AsrModelItemCard(
+                            model = model,
+                            isSelected = model.id == selectedAsrModel.id,
+                            isReady = viewModel.isAsrModelReady(model),
+                            downloadState = if (model.id == selectedAsrModel.id) asrState else ModelDownloadState.NotDownloaded,
+                            onSelect = { viewModel.selectAsrModel(model) },
+                            onDownload = {
+                                viewModel.selectAsrModel(model)
+                                viewModel.downloadAsrModel(model)
+                            },
+                            onDelete = { viewModel.deleteAsrModel(model) }
+                        )
+                    }
+                }
             }
         }
 
@@ -384,6 +367,75 @@ private fun AsrModelItemCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 11.sp
                         )
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        // Visual Chips: Tier, Download Size, Latency & RAM Profile
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (model.tier == com.example.asr.ModelTier.FAST)
+                                    MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.8f)
+                                else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.8f)
+                            ) {
+                                Text(
+                                    text = model.tier.badge,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (model.tier == com.example.asr.ModelTier.FAST)
+                                        MaterialTheme.colorScheme.onTertiaryContainer
+                                    else MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+
+                            val sizeMb = model.totalSizeBytes / (1024L * 1024L)
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                            ) {
+                                Text(
+                                    text = "📦 ${sizeMb} MB",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                )
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                            ) {
+                                Text(
+                                    text = model.latencyProfile,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                )
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                            ) {
+                                Text(
+                                    text = model.ramProfile,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                     }
                 }
 

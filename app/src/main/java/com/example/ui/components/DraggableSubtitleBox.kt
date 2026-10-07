@@ -7,6 +7,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,12 +54,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -100,6 +104,7 @@ fun DraggableSubtitleBox(
     // Sentence-level rolling buffers: retain recent clean sentences and roll off older ones
     var rollingSentences by remember { mutableStateOf<List<String>>(emptyList()) }
     var rollingOriginals by remember { mutableStateOf<List<String>>(emptyList()) }
+    var lastSpeechTimestamp by remember { mutableStateOf(System.currentTimeMillis()) }
 
     androidx.compose.runtime.LaunchedEffect(translatedText) {
         val trimmed = translatedText.trim()
@@ -109,6 +114,7 @@ fun DraggableSubtitleBox(
             rollingSentences.lastOrNull() != trimmed
         ) {
             rollingSentences = (rollingSentences + trimmed).takeLast(10)
+            lastSpeechTimestamp = System.currentTimeMillis()
         }
     }
 
@@ -119,6 +125,17 @@ fun DraggableSubtitleBox(
             rollingOriginals.lastOrNull() != trimmed
         ) {
             rollingOriginals = (rollingOriginals + trimmed).takeLast(10)
+            lastSpeechTimestamp = System.currentTimeMillis()
+        }
+    }
+
+    // Subtitle Linger Time effect: clears/fades rolling subtitles after lingerTimeSeconds
+    androidx.compose.runtime.LaunchedEffect(settings.lingerTimeSeconds, lastSpeechTimestamp) {
+        if (settings.lingerTimeSeconds > 0f) {
+            val lingerMs = (settings.lingerTimeSeconds * 1000L).toLong()
+            kotlinx.coroutines.delay(lingerMs)
+            rollingSentences = emptyList()
+            rollingOriginals = emptyList()
         }
     }
 
@@ -399,6 +416,16 @@ fun DraggableSubtitleBox(
                             .defaultMinSize(minHeight = stableMinHeight)
                             .padding(14.dp)
                     ) {
+                        val textShadow = if (settings.isTextOutlineShadowEnabled) {
+                            Shadow(
+                                color = Color.Black.copy(alpha = 0.92f),
+                                offset = Offset(2f, 2f),
+                                blurRadius = settings.textShadowRadius
+                            )
+                        } else {
+                            Shadow.None
+                        }
+
                         // Original foreign language text
                         if (settings.showOriginal) {
                             val visibleOriginals = rollingOriginals.takeLast(maxLinesCount)
@@ -413,6 +440,7 @@ fun DraggableSubtitleBox(
                                 fontSize = (settings.fontSizeSp - 3f).coerceAtLeast(12f).sp,
                                 color = theme.originalTextColor,
                                 fontStyle = FontStyle.Italic,
+                                style = TextStyle(shadow = textShadow),
                                 lineHeight = (settings.fontSizeSp + 2f).sp,
                                 maxLines = maxLinesCount,
                                 overflow = TextOverflow.Ellipsis,
@@ -445,6 +473,7 @@ fun DraggableSubtitleBox(
                             fontSize = settings.fontSizeSp.sp,
                             fontWeight = FontWeight.Bold,
                             color = textColor,
+                            style = TextStyle(shadow = textShadow),
                             lineHeight = (settings.fontSizeSp * 1.35f).sp,
                             maxLines = maxLinesCount,
                             overflow = TextOverflow.Ellipsis,
@@ -576,7 +605,7 @@ fun DraggableSubtitleBox(
                             )
                         }
 
-                        // Opacity Slider
+                        // Opacity Slider (20% to 100%)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
@@ -589,8 +618,54 @@ fun DraggableSubtitleBox(
                             Slider(
                                 value = settings.opacity,
                                 onValueChange = { onSettingsChanged(settings.copy(opacity = it)) },
-                                valueRange = 0.4f..1.0f,
+                                valueRange = 0.20f..1.0f,
                                 modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        // Subtitle Linger Time Slider
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (settings.lingerTimeSeconds <= 0f) "Linger: None" else "Linger: ${"%.1f".format(settings.lingerTimeSeconds)}s",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.width(76.dp)
+                            )
+                            Slider(
+                                value = settings.lingerTimeSeconds,
+                                onValueChange = { onSettingsChanged(settings.copy(lingerTimeSeconds = it)) },
+                                valueRange = 1.0f..10.0f,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        // Text Outline & Shadow Toggle
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Text Outline & Shadow",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Adds dark drop shadow for high contrast over bright scenes",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 10.sp
+                                )
+                            }
+                            Switch(
+                                checked = settings.isTextOutlineShadowEnabled,
+                                onCheckedChange = { onSettingsChanged(settings.copy(isTextOutlineShadowEnabled = it)) },
+                                modifier = Modifier.testTag("toggle_overlay_text_shadow")
                             )
                         }
 
@@ -615,12 +690,3 @@ fun DraggableSubtitleBox(
         }
     }
 }
-
-private fun Modifier.clickable(onClick: () -> Unit): Modifier = this.then(
-    Modifier.pointerInput(Unit) {
-        detectDragGestures(
-            onDragStart = { onClick() },
-            onDrag = { _, _ -> }
-        )
-    }
-)

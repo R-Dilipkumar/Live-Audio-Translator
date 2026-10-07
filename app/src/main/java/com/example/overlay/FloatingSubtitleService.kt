@@ -26,6 +26,7 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.example.data.SettingsRepository
 import com.example.service.AudioCaptureService
 import com.example.ui.components.DraggableSubtitleBox
 import kotlinx.coroutines.CoroutineScope
@@ -235,6 +236,18 @@ class FloatingSubtitleService : Service() {
                 },
                 onSettingsChanged = { newSettings ->
                     updateSettings(newSettings)
+                    serviceScope.launch {
+                        try {
+                            val repo = SettingsRepository(this@FloatingSubtitleService)
+                            repo.updateFontSize(newSettings.fontSizeSp)
+                            repo.updateOverlayOpacity(newSettings.opacity)
+                            repo.updateMaxDisplayLines(newSettings.maxLines)
+                            repo.updateShowOriginalSpeech(newSettings.showOriginal)
+                            repo.updateSubtitleLingerTime(newSettings.lingerTimeSeconds)
+                            repo.updateTextOutlineShadow(newSettings.isTextOutlineShadowEnabled)
+                            repo.updateTextShadowRadius(newSettings.textShadowRadius)
+                        } catch (_: Exception) {}
+                    }
                 },
                 onClose = {
                     val stopCaptureIntent = Intent(this@FloatingSubtitleService, AudioCaptureService::class.java).apply {
@@ -306,6 +319,22 @@ class FloatingSubtitleService : Service() {
     private fun startObservingTranscripts() {
         val translator = AudioCaptureService.getTranslatorEngine(this)
         val speech = AudioCaptureService.getSpeechEngine(this)
+
+        serviceScope.launch {
+            try {
+                SettingsRepository(this@FloatingSubtitleService).settingsFlow.collect { appSettings ->
+                    _currentSettings.value = _currentSettings.value.copy(
+                        fontSizeSp = appSettings.fontSizeSp,
+                        opacity = appSettings.overlayOpacity,
+                        maxLines = appSettings.maxDisplayLines,
+                        showOriginal = appSettings.showOriginalSpeech,
+                        lingerTimeSeconds = appSettings.subtitleLingerTimeSeconds,
+                        isTextOutlineShadowEnabled = appSettings.isTextOutlineShadowEnabled,
+                        textShadowRadius = appSettings.textShadowRadius
+                    )
+                }
+            } catch (_: Exception) {}
+        }
 
         var lastTranslationUpdateTime = 0L
         var lastPartialUpdateTime = 0L

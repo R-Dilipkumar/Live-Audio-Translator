@@ -18,7 +18,9 @@ import android.util.Log
 import com.example.audio.AudioUtils
 import com.example.asr.ModelManager
 import com.example.asr.SpeechRecognizerEngine
+import com.example.audio.VoiceIsolationProcessor
 import com.example.data.AppDatabase
+import com.example.data.SettingsRepository
 import com.example.data.TranscriptEntity
 import com.example.translate.LocalTranslatorEngine
 import kotlinx.coroutines.CoroutineScope
@@ -44,6 +46,12 @@ class AudioCaptureService : Service() {
     private var audioRecord: AudioRecord? = null
     private var isCapturing = false
     private var wakeLock: PowerManager.WakeLock? = null
+
+    // Audio Pre-processing: Voice isolation (IIR Biquad 150Hz - 3500Hz) & Noise Gate
+    private val voiceIsolationProcessor = VoiceIsolationProcessor()
+    private var isVoiceIsolationActive = true
+    private var noiseGateLevel = 0.015f
+    private var settingsObserverJob: Job? = null
 
     companion object {
         const val ACTION_START_INTERNAL_CAPTURE = "com.example.action.START_INTERNAL_CAPTURE"
@@ -98,6 +106,24 @@ class AudioCaptureService : Service() {
     override fun onCreate() {
         super.onCreate()
         NotificationHelper.createNotificationChannels(this)
+
+        val settingsRepo = SettingsRepository(this)
+        val speechEngine = getSpeechEngine(this)
+        val translatorEngine = getTranslatorEngine(this)
+
+        settingsObserverJob?.cancel()
+        settingsObserverJob = serviceScope.launch {
+            settingsRepo.settingsFlow.collect { settings ->
+                isVoiceIsolationActive = settings.isVoiceIsolationEnabled
+                noiseGateLevel = settings.noiseGateThreshold
+
+                speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
+                speechEngine.maxUtteranceWindow = settings.maxUtteranceWindow
+                speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
+
+                translatorEngine.confidenceThreshold = settings.languageIdConfidence
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -431,11 +457,18 @@ class AudioCaptureService : Service() {
                             isStereo = isStereo
                         )
 
+                        // Voice Isolation DSP Filter (150Hz - 3500Hz bandpass) + Noise Gate (RMS threshold)
+                        val processedSamples = voiceIsolationProcessor.process(
+                            input = floatSamples,
+                            noiseGateThreshold = noiseGateLevel,
+                            isFilterEnabled = isVoiceIsolationActive
+                        )
+
                         // Feed to SpeechRecognizerEngine
-                        speechEngine.feedAudioSamples(floatSamples)
+                        speechEngine.feedAudioSamples(processedSamples)
 
                         // Calculate RMS dB for UI visualizer
-                        val db = AudioUtils.calculateDbLevel(floatSamples)
+                        val db = AudioUtils.calculateDbLevel(processedSamples)
                         _liveAudioDb.value = db
 
                         // Requirement 4: Detect continuous silence (>5s with RMS < 5 dB) during internal capture

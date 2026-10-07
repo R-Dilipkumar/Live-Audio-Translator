@@ -117,6 +117,8 @@ class LocalTranslatorEngine(private val context: Context) {
 
     // Retained previously identified language for confidence threshold fallback
     private var lastIdentifiedLanguage: String = TranslateLanguage.JAPANESE
+    // Configurable Language ID Confidence threshold (default 0.55)
+    var confidenceThreshold: Float = 0.55f
     // Fallback cache for stable translations
     private var lastStableTranslation: String? = null
 
@@ -300,18 +302,19 @@ class LocalTranslatorEngine(private val context: Context) {
 
     /**
      * Identifies the language of the provided text via ML Kit Language Identification.
-     * Requires a minimum confidence threshold of 0.55. If below 0.55 or undetermined,
+     * Requires a minimum confidence threshold (default 0.55). If below threshold or undetermined,
      * retains and returns the previously identified language rather than falling back.
      */
     suspend fun identifyLanguage(text: String): String = withContext(Dispatchers.IO) {
         try {
             val possibleLanguages = languageIdentifier.identifyPossibleLanguages(text).await()
             val best = possibleLanguages.maxByOrNull { it.confidence }
-            if (best != null && best.languageTag != "und" && best.confidence >= 0.55f) {
+            val threshold = confidenceThreshold
+            if (best != null && best.languageTag != "und" && best.confidence >= threshold) {
                 lastIdentifiedLanguage = best.languageTag
                 best.languageTag
             } else {
-                Log.d(TAG, "Language confidence below 0.55 threshold (best=${best?.languageTag}@${best?.confidence}). Retaining last identified: $lastIdentifiedLanguage")
+                Log.d(TAG, "Language confidence below $threshold threshold (best=${best?.languageTag}@${best?.confidence}). Retaining last identified: $lastIdentifiedLanguage")
                 lastIdentifiedLanguage
             }
         } catch (e: Exception) {

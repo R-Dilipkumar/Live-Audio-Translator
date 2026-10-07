@@ -146,7 +146,11 @@ fun MainScreen(
                             color = MaterialTheme.colorScheme.primaryContainer
                         ) {
                             Text(
-                                text = if (selectedTab == 0) "Floating Audio Translator" else "Offline Engine Manager",
+                                text = when (selectedTab) {
+                                    0 -> "Floating Audio Translator"
+                                    1 -> "Offline Engine Manager"
+                                    else -> "Settings & DSP Tuning"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -219,6 +223,23 @@ fun MainScreen(
                         )
                     },
                     modifier = Modifier.testTag("tab_manage_models")
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Outlined.Settings,
+                            contentDescription = "Settings Tab"
+                        )
+                    },
+                    label = {
+                        Text(
+                            text = "Settings",
+                            fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal
+                        )
+                    },
+                    modifier = Modifier.testTag("tab_settings")
                 )
             }
         }
@@ -575,9 +596,12 @@ fun MainScreen(
                         }
                     }
                 }
-            } else {
+            } else if (selectedTab == 1) {
                 // TAB 2: MODEL MANAGEMENT SCREEN
                 ModelManagementScreen(viewModel = viewModel)
+            } else {
+                // TAB 3: SETTINGS & PARAMETERS SCREEN
+                SettingsScreen(viewModel = viewModel)
             }
         }
     }

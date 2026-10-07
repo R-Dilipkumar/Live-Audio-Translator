@@ -55,6 +55,15 @@ class SpeechRecognizerEngine(
     private var streamEmittedLength = 0
     private var isSherpaLoaded = false
 
+    // Configurable endpointing parameters
+    var silenceEndpointDelay: Float = 1.1f
+    var maxUtteranceWindow: Float = 15.0f
+    var isAntiFreezeWatchdogEnabled: Boolean = true
+
+    // Anti-freeze watchdog tracking
+    private var continuousAudioStartTime = 0L
+    private var lastOutputOrResetTime = System.currentTimeMillis()
+
     // Consistent buffer size of 0.1s (1600 samples at 16kHz 16-bit mono) aligned to 2-byte boundaries
     companion object {
         const val CHUNK_SIZE_SAMPLES = 1600
@@ -124,8 +133,8 @@ class SpeechRecognizerEngine(
 
             val endpointConfig = EndpointConfig(
                 rule1 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = false, minTrailingSilence = 1.2f, minUtteranceLength = 0.0f),
-                rule2 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = true, minTrailingSilence = 1.1f, minUtteranceLength = 1.5f),
-                rule3 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = false, minTrailingSilence = 0.0f, minUtteranceLength = 15.0f)
+                rule2 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = true, minTrailingSilence = silenceEndpointDelay, minUtteranceLength = 1.5f),
+                rule3 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = false, minTrailingSilence = 0.0f, minUtteranceLength = maxUtteranceWindow)
             )
 
             val recognizerConfig = OnlineRecognizerConfig(
@@ -206,6 +215,7 @@ class SpeechRecognizerEngine(
                         val completeClause = uncommitted.substring(0, punctIndex + 1).trim()
                         if (completeClause.isNotBlank()) {
                             Log.d(TAG, "Punctuation boundary sentence detected: $completeClause")
+                            lastOutputOrResetTime = System.currentTimeMillis()
                             scope.launch {
                                 _recognizedTextFlow.emit(completeClause)
                             }
@@ -246,7 +256,29 @@ class SpeechRecognizerEngine(
                         streamEmittedLength = 0
                         lastEmittedText = ""
                         _partialTextFlow.value = ""
+                        lastOutputOrResetTime = System.currentTimeMillis()
                         recognizer.reset(stream)
+                    }
+
+                    // Anti-Freeze Watchdog:
+                    // If continuous audio processing occurs for > 6 seconds without any output or endpointing,
+                    // automatically flush/reset the stream to recover from stalled decoder states
+                    if (isAntiFreezeWatchdogEnabled) {
+                        val timeSinceLast = System.currentTimeMillis() - lastOutputOrResetTime
+                        if (timeSinceLast >= 6000L) {
+                            Log.w(TAG, "Anti-Freeze Watchdog: 6 seconds of audio with no output. Auto-recovering stream.")
+                            val stalledText = fullText.substring(streamEmittedLength.coerceAtMost(fullText.length)).trim()
+                            if (stalledText.isNotBlank()) {
+                                scope.launch {
+                                    _recognizedTextFlow.emit(stalledText)
+                                }
+                            }
+                            streamEmittedLength = 0
+                            lastEmittedText = ""
+                            _partialTextFlow.value = ""
+                            lastOutputOrResetTime = System.currentTimeMillis()
+                            recognizer.reset(stream)
+                        }
                     }
                 }
             } catch (t: Throwable) {

@@ -13,6 +13,7 @@ import com.example.asr.ModelManager
 import com.example.asr.SpeechRecognizerEngine
 import com.example.data.AppDatabase
 import com.example.data.TranscriptEntity
+import com.example.overlay.FloatingSubtitleService
 import com.example.service.AudioCaptureService
 import com.example.translate.LocalTranslatorEngine
 import com.example.translate.SupportedLanguage
@@ -32,6 +33,11 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     val speechEngine: SpeechRecognizerEngine = AudioCaptureService.getSpeechEngine(context)
     val translatorEngine: LocalTranslatorEngine = AudioCaptureService.getTranslatorEngine(context)
     private val transcriptDao = AppDatabase.getInstance(context).transcriptDao()
+    val settingsRepository = com.example.data.SettingsRepository(context)
+
+    // Persistent App Settings Flow
+    val appSettings: StateFlow<com.example.data.AppSettings> = settingsRepository.settingsFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.AppSettings())
 
     // Service capture state
     val isCapturing: StateFlow<Boolean> = AudioCaptureService.isServiceRunning
@@ -146,6 +152,26 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
                         transcriptDao.insert(entity)
                     }
                 }
+            }
+        }
+
+        // Keep local engines and floating overlay settings synchronized with persisted AppSettings
+        viewModelScope.launch {
+            appSettings.collect { settings ->
+                speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
+                speechEngine.maxUtteranceWindow = settings.maxUtteranceWindow
+                speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
+                translatorEngine.confidenceThreshold = settings.languageIdConfidence
+
+                val currentFloating = FloatingSubtitleService.currentSettings.value
+                val updatedFloating = currentFloating.copy(
+                    fontSizeSp = settings.fontSizeSp,
+                    opacity = settings.overlayOpacity,
+                    maxLines = settings.maxDisplayLines,
+                    showOriginal = settings.showOriginalSpeech,
+                    lingerTimeSeconds = settings.subtitleLingerTimeSeconds
+                )
+                FloatingSubtitleService.updateSettings(updatedFloating)
             }
         }
     }
