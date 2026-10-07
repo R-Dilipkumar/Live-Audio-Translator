@@ -20,7 +20,10 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "liveaudio_translate.db"
-                ).fallbackToDestructiveMigration().build()
+                )
+                // TODO: Replace fallbackToDestructiveMigration with proper Migration objects before schema version bump
+                .fallbackToDestructiveMigration()
+                .build()
                 INSTANCE = instance
                 instance
             }

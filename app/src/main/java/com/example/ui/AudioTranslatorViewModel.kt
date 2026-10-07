@@ -134,24 +134,14 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
             }
         }
 
-        // Collect completed translations for live UI and persist if not already handled by service
+        // Collect completed translations for live UI display only.
+        // BUG 1 FIX: Room persistence is handled exclusively by AudioCaptureService.translationPersistJob.
+        // Having both the service AND the ViewModel insert into Room caused duplicate transcript rows
+        // every time a translation was emitted while the service was running.
         viewModelScope.launch {
             translatorEngine.translationFlow.collect { result ->
                 _currentOriginalSpeech.value = result.originalText
                 _currentTranslatedSpeech.value = result.translatedText
-
-                if (!isCapturing.value) {
-                    val entity = TranscriptEntity(
-                        originalText = result.originalText,
-                        translatedText = result.translatedText,
-                        sourceLanguage = result.sourceLangCode,
-                        targetLanguage = result.targetLangCode,
-                        timestamp = result.timestamp
-                    )
-                    launch(Dispatchers.IO) {
-                        transcriptDao.insert(entity)
-                    }
-                }
             }
         }
 

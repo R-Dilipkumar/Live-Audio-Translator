@@ -73,31 +73,38 @@ class AudioCaptureService : Service() {
         private val _isDrmSilenceDetected = MutableStateFlow(false)
         val isDrmSilenceDetected: StateFlow<Boolean> = _isDrmSilenceDetected.asStateFlow()
 
-        // Shared engine references initialized with application context
-        private var sharedModelManager: ModelManager? = null
-        private var sharedSpeechEngine: SpeechRecognizerEngine? = null
-        private var sharedTranslatorEngine: LocalTranslatorEngine? = null
+        // BUG 2 FIX: All shared singleton fields must be @Volatile to prevent instruction-reordering
+        // NPE under concurrent access (e.g., Quick Settings tile + main app starting simultaneously).
+        // Pattern mirrors AppDatabase.getInstance() which already does this correctly.
+        @Volatile private var sharedModelManager: ModelManager? = null
+        @Volatile private var sharedSpeechEngine: SpeechRecognizerEngine? = null
+        @Volatile private var sharedTranslatorEngine: LocalTranslatorEngine? = null
 
         fun getModelManager(context: Context): ModelManager {
-            if (sharedModelManager == null) {
-                sharedModelManager = ModelManager(context.applicationContext)
+            return sharedModelManager ?: synchronized(this) {
+                sharedModelManager ?: ModelManager(context.applicationContext).also {
+                    sharedModelManager = it
+                }
             }
-            return sharedModelManager!!
         }
 
         fun getSpeechEngine(context: Context): SpeechRecognizerEngine {
-            if (sharedSpeechEngine == null) {
-                val mm = getModelManager(context)
-                sharedSpeechEngine = SpeechRecognizerEngine(context.applicationContext, mm)
+            return sharedSpeechEngine ?: synchronized(this) {
+                sharedSpeechEngine ?: SpeechRecognizerEngine(
+                    context.applicationContext,
+                    getModelManager(context)
+                ).also {
+                    sharedSpeechEngine = it
+                }
             }
-            return sharedSpeechEngine!!
         }
 
         fun getTranslatorEngine(context: Context): LocalTranslatorEngine {
-            if (sharedTranslatorEngine == null) {
-                sharedTranslatorEngine = LocalTranslatorEngine(context.applicationContext)
+            return sharedTranslatorEngine ?: synchronized(this) {
+                sharedTranslatorEngine ?: LocalTranslatorEngine(context.applicationContext).also {
+                    sharedTranslatorEngine = it
+                }
             }
-            return sharedTranslatorEngine!!
         }
     }
 
@@ -160,12 +167,22 @@ class AudioCaptureService : Service() {
                         "Capture Permission Error",
                         "Missing MediaProjection token to capture internal audio."
                     )
+                    // BUG 9 FIX: Remove the foreground notification before stopping to avoid
+                    // a notification flash when resultData is null
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        stopForeground(true)
+                    }
                     stopSelf()
                 }
             }
 
             ACTION_START_MIC_CAPTURE -> {
-                startForegroundWithMediaProjection()
+                // BUG 6 FIX: Use FOREGROUND_SERVICE_TYPE_MICROPHONE for mic capture,
+                // NOT FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION (throws SecurityException on Android 14+)
+                startForegroundForMic()
                 _isDrmSilenceDetected.value = false
                 startMicrophoneCapture()
             }
@@ -208,6 +225,26 @@ class AudioCaptureService : Service() {
         _isServiceRunning.value = true
 
         // Requirement 2: Acquire PARTIAL_WAKE_LOCK to prevent battery optimizer from killing ASR during gaming/video sessions
+        acquireWakeLock()
+    }
+
+    /**
+     * BUG 6 FIX: Mic capture must declare FOREGROUND_SERVICE_TYPE_MICROPHONE, NOT
+     * FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION. Android 14+ enforces strict type matching
+     * and throws SecurityException when the declared type doesn't match actual usage.
+     */
+    private fun startForegroundForMic() {
+        val notification = NotificationHelper.buildCaptureNotification(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NotificationHelper.NOTIFICATION_CAPTURE_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } else {
+            startForeground(NotificationHelper.NOTIFICATION_CAPTURE_ID, notification)
+        }
+        _isServiceRunning.value = true
         acquireWakeLock()
     }
 
@@ -510,7 +547,7 @@ class AudioCaptureService : Service() {
         }
     }
 
-    private fun stopCapture() {
+    private fun stopCapture(calledFromDestroy: Boolean = false) {
         isCapturing = false
         captureJob?.cancel()
         captureJob = null
@@ -543,10 +580,16 @@ class AudioCaptureService : Service() {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
+
+        // BUG 12 FIX: Stop the service so it doesn't linger as an invisible background service.
+        // Guard against double-call when invoked from onDestroy() (Android already handles teardown).
+        if (!calledFromDestroy) {
+            stopSelf()
+        }
     }
 
     override fun onDestroy() {
-        stopCapture()
+        stopCapture(calledFromDestroy = true)
         serviceScope.cancel()
         super.onDestroy()
     }

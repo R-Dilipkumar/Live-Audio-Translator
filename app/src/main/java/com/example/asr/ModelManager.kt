@@ -2,6 +2,7 @@ package com.example.asr
 
 import android.content.Context
 import android.os.StatFs
+import android.util.Log
 import com.example.service.NotificationHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +69,8 @@ sealed class ModelDownloadState {
 }
 
 class ModelManager(private val context: Context) {
+
+    private val TAG = "ModelManager"
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -471,9 +474,15 @@ class ModelManager(private val context: Context) {
             if (isModelReady(model)) {
                 _downloadState.value = ModelDownloadState.Ready(targetDir)
             } else {
-                // If direct archive needs standard model files, prepare fallback
-                ensureModelFilesExist(targetDir, model)
-                _downloadState.value = ModelDownloadState.Ready(targetDir)
+                // BUG 4 FIX: Do NOT write zero-byte placeholder ONNX files. If the archive
+                // extracted but the expected model files are still missing, the archive content
+                // is incompatible or corrupt. Delete the partial directory and report a hard error.
+                // Writing placeholder bytes causes a silent crash in the Sherpa-ONNX JNI native loader.
+                Log.e(TAG, "Model extraction succeeded but required files are missing. Cleaning up.")
+                cleanupPartialFiles(null, targetDir, model)
+                val error = "Model archive did not contain expected ONNX files. Please retry the download."
+                _downloadState.value = ModelDownloadState.Error(error)
+                NotificationHelper.showErrorNotification(context, "Model Extraction Failed", error)
             }
 
         } catch (e: CancellationException) {
@@ -492,23 +501,6 @@ class ModelManager(private val context: Context) {
                 tempArchiveFile.delete()
             }
         }
-    }
-
-    /**
-     * Creates clean placeholder metadata and token map if an unextracted archive is provided,
-     * ensuring recognizer has a functional offline model structure.
-     */
-    private fun ensureModelFilesExist(targetDir: File, model: AsrModelConfig) {
-        val tokensFile = File(targetDir, model.tokensFilename)
-        if (!tokensFile.exists()) {
-            tokensFile.writeText("<blk> 0\n<sos/eos> 1\n<unk> 2\n hello 3\n world 4\n audio 5\n translate 6\n speech 7\n video 8\n game 9\n live 10\n")
-        }
-        val encoder = File(targetDir, model.encoderFilename)
-        if (!encoder.exists()) encoder.writeBytes(ByteArray(2048))
-        val decoder = File(targetDir, model.decoderFilename)
-        if (!decoder.exists()) decoder.writeBytes(ByteArray(2048))
-        val joiner = File(targetDir, model.joinerFilename)
-        if (!joiner.exists()) joiner.writeBytes(ByteArray(2048))
     }
 
     /**

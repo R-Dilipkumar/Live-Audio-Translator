@@ -79,6 +79,9 @@ class FloatingSubtitleService : Service() {
     private var translationCollectJob: Job? = null
     private var partialCollectJob: Job? = null
     private var drmCollectJob: Job? = null
+    // BUG 13 FIX: Track the settings observer job so it can be cancelled before re-launching,
+    // preventing multiple settings collectors from accumulating on each showOverlay() call.
+    private var settingsCollectJob: Job? = null
 
     // State flows actively collected by Compose view for instant recomposition
     private val _floatingOriginalText = MutableStateFlow("Waiting for live speech...")
@@ -113,6 +116,10 @@ class FloatingSubtitleService : Service() {
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        // BUG 5 FIX: Initialize the OverlayLifecycleOwner once at service creation rather than
+        // recreating it on every showOverlay() call. This preserves Compose remembered state and
+        // ViewModelStore across overlay hide/show cycles (e.g., user toggles overlay).
+        overlayLifecycleOwner = OverlayLifecycleOwner().also { it.onCreate() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -202,10 +209,10 @@ class FloatingSubtitleService : Service() {
         }
         layoutParams = params
 
-        // Initialize ComposeView with custom lifecycle controllers
-        val lifecycleOwner = OverlayLifecycleOwner()
-        lifecycleOwner.onCreate()
-        overlayLifecycleOwner = lifecycleOwner
+        // BUG 5 FIX: Use the service-level overlayLifecycleOwner created in onCreate().
+        // The owner is initialized once and reused across show/hide cycles to preserve
+        // Compose remembered state and ViewModelStore.
+        val lifecycleOwner = overlayLifecycleOwner ?: return
 
         val composeView = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
@@ -320,7 +327,8 @@ class FloatingSubtitleService : Service() {
         val translator = AudioCaptureService.getTranslatorEngine(this)
         val speech = AudioCaptureService.getSpeechEngine(this)
 
-        serviceScope.launch {
+        settingsCollectJob?.cancel()
+        settingsCollectJob = serviceScope.launch {
             try {
                 SettingsRepository(this@FloatingSubtitleService).settingsFlow.collect { appSettings ->
                     _currentSettings.value = _currentSettings.value.copy(
@@ -397,8 +405,9 @@ class FloatingSubtitleService : Service() {
         } catch (e: Exception) {
             e.printStackTrace()
         } finally {
-            overlayLifecycleOwner?.onDestroy()
-            overlayLifecycleOwner = null
+            // BUG 5 FIX: Do NOT destroy the lifecycle owner here — it is now service-scoped.
+            // Destroying it on removeOverlay would wipe the ViewModelStore, resetting all
+            // Compose remembered state the next time showOverlay() is called.
             overlayRootView = null
             _isOverlayActive.value = false
         }
@@ -413,8 +422,12 @@ class FloatingSubtitleService : Service() {
         translationCollectJob?.cancel()
         partialCollectJob?.cancel()
         drmCollectJob?.cancel()
+        settingsCollectJob?.cancel()
         serviceScope.cancel()
         removeOverlay()
+        // BUG 5 FIX: Destroy the service-level lifecycle owner only when the service truly stops.
+        overlayLifecycleOwner?.onDestroy()
+        overlayLifecycleOwner = null
         super.onDestroy()
     }
 }

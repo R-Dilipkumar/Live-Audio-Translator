@@ -63,12 +63,19 @@ class SpeechRecognizerEngine(
     // Anti-freeze watchdog tracking
     private var continuousAudioStartTime = 0L
     private var lastOutputOrResetTime = System.currentTimeMillis()
+    // BUG 3 FIX: Track whether audio feeding has started so watchdog timestamps are initialized
+    // on the first real audio frame rather than at construction time (which can cause premature
+    // watchdog firing if there is lag between construction and the first feedAudioSamples() call).
+    private var audioFeedingStarted = false
 
     // Consistent buffer size of 0.1s (1600 samples at 16kHz 16-bit mono) aligned to 2-byte boundaries
     companion object {
         const val CHUNK_SIZE_SAMPLES = 1600
     }
-    private val pcmChunkAccumulator = mutableListOf<Float>()
+    // BUG 7 FIX: Use ArrayDeque instead of MutableList<Float>. The old subList(0, n).clear()
+    // on an ArrayList is O(n) because all remaining elements must be shifted left. At 10 chunks/sec
+    // over a long session, this causes significant GC pressure. ArrayDeque.removeFirst() is O(1).
+    private val pcmChunkAccumulator = ArrayDeque<Float>(CHUNK_SIZE_SAMPLES * 4)
 
     // Fallback voice activity detector for acoustic audio verification
     private var energyAccumulator = 0f
@@ -176,17 +183,27 @@ class SpeechRecognizerEngine(
             try {
                 _engineState.value = RecognizerState.Listening
 
+                // BUG 3 FIX: Initialize watchdog timestamps on the very first audio frame
+                // to avoid premature watchdog firing caused by model-load lag.
+                if (!audioFeedingStarted) {
+                    val now = System.currentTimeMillis()
+                    continuousAudioStartTime = now
+                    lastOutputOrResetTime = now
+                    audioFeedingStarted = true
+                }
+
                 val chunksToProcess = mutableListOf<FloatArray>()
                 synchronized(pcmChunkAccumulator) {
                     for (sample in samples) {
-                        pcmChunkAccumulator.add(sample)
+                        pcmChunkAccumulator.addLast(sample)
                     }
                     while (pcmChunkAccumulator.size >= CHUNK_SIZE_SAMPLES) {
                         val chunk = FloatArray(CHUNK_SIZE_SAMPLES)
                         for (i in 0 until CHUNK_SIZE_SAMPLES) {
                             chunk[i] = pcmChunkAccumulator[i]
                         }
-                        pcmChunkAccumulator.subList(0, CHUNK_SIZE_SAMPLES).clear()
+                        // BUG 7 FIX: removeFirst() is O(1) on ArrayDeque vs O(n) subList().clear()
+                        repeat(CHUNK_SIZE_SAMPLES) { pcmChunkAccumulator.removeFirst() }
                         chunksToProcess.add(chunk)
                     }
                 }
@@ -355,6 +372,7 @@ class SpeechRecognizerEngine(
             onlineStream = null
             onlineRecognizer = null
             streamEmittedLength = 0
+            audioFeedingStarted = false
             synchronized(pcmChunkAccumulator) {
                 pcmChunkAccumulator.clear()
             }

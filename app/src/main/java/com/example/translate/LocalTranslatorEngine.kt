@@ -142,6 +142,9 @@ class LocalTranslatorEngine(private val context: Context) {
     fun setSourceLanguage(language: SupportedLanguage) {
         if (_sourceLanguage.value != language) {
             _sourceLanguage.value = language
+            // BUG 8 FIX: Clear stale fallback so a failure after a language change doesn't
+            // display a translation from the previous language pair.
+            lastStableTranslation = null
             scope.launch { checkAndPrepareTranslator() }
         }
     }
@@ -149,6 +152,8 @@ class LocalTranslatorEngine(private val context: Context) {
     fun setTargetLanguage(language: SupportedLanguage) {
         if (_targetLanguage.value != language && !language.isAutoDetect) {
             _targetLanguage.value = language
+            // BUG 8 FIX: Clear stale fallback on target language change.
+            lastStableTranslation = null
             scope.launch { checkAndPrepareTranslator() }
         }
     }
@@ -226,38 +231,52 @@ class LocalTranslatorEngine(private val context: Context) {
 
     /**
      * Downloads an individual language pack (e.g., from Model Management Screen).
+     * BUG 11 FIX: maxRetries is now implemented with exponential backoff. Previously the parameter
+     * was accepted but silently ignored — download failures were never retried.
      */
-    suspend fun downloadSingleLanguagePack(langCode: String): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val currentMap = _downloadingPacks.value.toMutableMap()
-            currentMap[langCode] = 20
-            _downloadingPacks.value = currentMap
+    suspend fun downloadSingleLanguagePack(langCode: String, maxRetries: Int = 2): Boolean = withContext(Dispatchers.IO) {
+        val currentMap = _downloadingPacks.value.toMutableMap()
+        currentMap[langCode] = 20
+        _downloadingPacks.value = currentMap
 
-            val model = TranslateRemoteModel.Builder(langCode).build()
-            val conditions = DownloadConditions.Builder().build()
-            
-            currentMap[langCode] = 50
-            _downloadingPacks.value = currentMap
+        val model = TranslateRemoteModel.Builder(langCode).build()
+        val conditions = DownloadConditions.Builder().build()
 
-            modelManager.download(model, conditions).await()
+        var lastException: Exception? = null
+        repeat(maxRetries) { attempt ->
+            try {
+                currentMap[langCode] = 20 + (attempt * 15)
+                _downloadingPacks.value = currentMap.toMap()
 
-            currentMap[langCode] = 100
-            _downloadingPacks.value = currentMap
-            delay(300)
-            currentMap.remove(langCode)
-            _downloadingPacks.value = currentMap
+                modelManager.download(model, conditions).await()
 
-            refreshDownloadedLanguages()
-            checkAndPrepareTranslator()
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed downloading pack $langCode: ${e.message}")
-            val currentMap = _downloadingPacks.value.toMutableMap()
-            currentMap.remove(langCode)
-            _downloadingPacks.value = currentMap
-            NotificationHelper.showErrorNotification(context, "Language Pack Download Failed", "Failed to download $langCode: ${e.localizedMessage}")
-            false
+                currentMap[langCode] = 100
+                _downloadingPacks.value = currentMap.toMap()
+                delay(300)
+                currentMap.remove(langCode)
+                _downloadingPacks.value = currentMap.toMap()
+
+                refreshDownloadedLanguages()
+                checkAndPrepareTranslator()
+                return@withContext true
+            } catch (e: Exception) {
+                lastException = e
+                Log.w(TAG, "Download attempt ${attempt + 1}/$maxRetries for $langCode failed: ${e.message}")
+                if (attempt < maxRetries - 1) {
+                    delay(1500L * (attempt + 1)) // exponential backoff: 1.5s, 3s, ...
+                }
+            }
         }
+
+        Log.e(TAG, "All $maxRetries download attempts failed for $langCode", lastException)
+        currentMap.remove(langCode)
+        _downloadingPacks.value = currentMap.toMap()
+        NotificationHelper.showErrorNotification(
+            context,
+            "Language Pack Download Failed",
+            "Failed to download $langCode after $maxRetries attempts: ${lastException?.localizedMessage}"
+        )
+        false
     }
 
     /**
