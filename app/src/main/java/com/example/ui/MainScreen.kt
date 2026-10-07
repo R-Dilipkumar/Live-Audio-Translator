@@ -1,10 +1,6 @@
 package com.example.ui
 
-import android.app.Activity
 import android.content.Context
-import android.media.projection.MediaProjectionManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -81,7 +77,7 @@ import com.example.ui.components.LanguageSelectorRow
 @Composable
 fun MainScreen(
     viewModel: AudioTranslatorViewModel,
-    onRequestCapturePermission: () -> Unit,
+    onRequestCapturePermission: (isMic: Boolean) -> Unit,
     onRequestOverlayPermission: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -107,17 +103,6 @@ fun MainScreen(
     var selectedTab by remember { mutableIntStateOf(0) } // 0: Translate, 1: Manage Models
 
     val context = LocalContext.current
-
-    // MediaProjection token launcher directly within Composable
-    val mediaProjectionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            viewModel.startInternalCapture(result.resultCode, result.data!!)
-        } else {
-            viewModel.showError("Audio capture permission was denied or cancelled.")
-        }
-    }
 
     var showHistorySheet by remember { mutableStateOf(false) }
     var showInAppFloatingBox by remember { mutableStateOf(true) }
@@ -556,21 +541,7 @@ fun MainScreen(
                         } else {
                             Button(
                                 onClick = {
-                                    if (isMicMode) {
-                                        viewModel.startMicCapture()
-                                    } else {
-                                        // Requirement 1: Call MediaProjectionManager.createScreenCaptureIntent() and launch it via rememberLauncherForActivityResult
-                                        val mediaProjectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
-                                        if (mediaProjectionManager != null) {
-                                            try {
-                                                mediaProjectionLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
-                                            } catch (e: Exception) {
-                                                viewModel.showError("Failed to launch screen capture: ${e.localizedMessage}")
-                                            }
-                                        } else {
-                                            onRequestCapturePermission()
-                                        }
-                                    }
+                                    onRequestCapturePermission(isMicMode)
                                 },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = MaterialTheme.colorScheme.primary

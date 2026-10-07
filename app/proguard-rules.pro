@@ -36,4 +36,5 @@
 -keep class com.example.data.** { *; }
 -keep class com.example.asr.AsrModelConfig { *; }
 -keep class com.example.translate.SupportedLanguage { *; }
--keep class com.example.overlay.OverlaySettingsState { *; }
+-keep class com.example.overlay.OverlaySettings { *; }
+-keep class com.example.overlay.OverlayTheme { *; }

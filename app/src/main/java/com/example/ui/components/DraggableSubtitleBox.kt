@@ -105,6 +105,7 @@ fun DraggableSubtitleBox(
     var rollingSentences by remember { mutableStateOf<List<String>>(emptyList()) }
     var rollingOriginals by remember { mutableStateOf<List<String>>(emptyList()) }
     var lastSpeechTimestamp by remember { mutableStateOf(System.currentTimeMillis()) }
+    var isLingeredOut by remember { mutableStateOf(false) }
 
     androidx.compose.runtime.LaunchedEffect(translatedText) {
         val trimmed = translatedText.trim()
@@ -115,6 +116,7 @@ fun DraggableSubtitleBox(
         ) {
             rollingSentences = (rollingSentences + trimmed).takeLast(10)
             lastSpeechTimestamp = System.currentTimeMillis()
+            isLingeredOut = false
         }
     }
 
@@ -126,6 +128,13 @@ fun DraggableSubtitleBox(
         ) {
             rollingOriginals = (rollingOriginals + trimmed).takeLast(10)
             lastSpeechTimestamp = System.currentTimeMillis()
+            isLingeredOut = false
+        }
+    }
+
+    androidx.compose.runtime.LaunchedEffect(partialText) {
+        if (partialText.isNotBlank()) {
+            isLingeredOut = false
         }
     }
 
@@ -136,6 +145,7 @@ fun DraggableSubtitleBox(
             kotlinx.coroutines.delay(lingerMs)
             rollingSentences = emptyList()
             rollingOriginals = emptyList()
+            isLingeredOut = true
         }
     }
 
@@ -427,36 +437,46 @@ fun DraggableSubtitleBox(
                         }
 
                         // Original foreign language text
+                        val isProcessingAudio = partialText.isNotBlank()
                         if (settings.showOriginal) {
                             val visibleOriginals = rollingOriginals.takeLast(maxLinesCount)
                             val origBase = if (visibleOriginals.isNotEmpty()) {
                                 visibleOriginals.joinToString("\n")
+                            } else if (isLingeredOut && settings.lingerTimeSeconds > 0f && !isProcessingAudio) {
+                                ""
                             } else {
                                 originalText
                             }
-                            val displayOrig = if (partialText.isNotBlank()) "$origBase $partialText …" else origBase
-                            Text(
-                                text = displayOrig,
-                                fontSize = (settings.fontSizeSp - 3f).coerceAtLeast(12f).sp,
-                                color = theme.originalTextColor,
-                                fontStyle = FontStyle.Italic,
-                                style = TextStyle(shadow = textShadow),
-                                lineHeight = (settings.fontSizeSp + 2f).sp,
-                                maxLines = maxLinesCount,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(bottom = 6.dp)
-                            )
+                            val displayOrig = if (isProcessingAudio) {
+                                if (origBase.isNotBlank()) "$origBase $partialText …" else "$partialText …"
+                            } else {
+                                origBase
+                            }
+                            if (displayOrig.isNotBlank()) {
+                                Text(
+                                    text = displayOrig,
+                                    fontSize = (settings.fontSizeSp - 3f).coerceAtLeast(12f).sp,
+                                    color = theme.originalTextColor,
+                                    fontStyle = FontStyle.Italic,
+                                    style = TextStyle(shadow = textShadow),
+                                    lineHeight = (settings.fontSizeSp + 2f).sp,
+                                    maxLines = maxLinesCount,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(bottom = 6.dp)
+                                )
+                            }
                         }
 
                         // Translated Subtitle Output (Primary) - Strict UI Slot Separation:
                         // NEVER render raw partialTextFlow or source speech inside this container.
-                        val isProcessingAudio = partialText.isNotBlank()
                         val visibleSentences = rollingSentences.takeLast(maxLinesCount)
                         val displayTranslated = if (isPaused) {
                             "[Translation Paused]"
                         } else if (visibleSentences.isNotEmpty()) {
                             val joined = visibleSentences.joinToString("\n")
                             if (isProcessingAudio) "$joined …" else joined
+                        } else if (isLingeredOut && settings.lingerTimeSeconds > 0f && !isProcessingAudio) {
+                            ""
                         } else {
                             val fallback = if (translatedText.isNotBlank()) translatedText else "…"
                             if (isProcessingAudio) "$fallback …" else fallback
@@ -468,17 +488,19 @@ fun DraggableSubtitleBox(
                             theme.textColor
                         }
 
-                        Text(
-                            text = displayTranslated,
-                            fontSize = settings.fontSizeSp.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = textColor,
-                            style = TextStyle(shadow = textShadow),
-                            lineHeight = (settings.fontSizeSp * 1.35f).sp,
-                            maxLines = maxLinesCount,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.testTag("floating_translated_subtitle_text")
-                        )
+                        if (displayTranslated.isNotBlank()) {
+                            Text(
+                                text = displayTranslated,
+                                fontSize = settings.fontSizeSp.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = textColor,
+                                style = TextStyle(shadow = textShadow),
+                                lineHeight = (settings.fontSizeSp * 1.35f).sp,
+                                maxLines = maxLinesCount,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.testTag("floating_translated_subtitle_text")
+                            )
+                        }
                     }
                 }
 

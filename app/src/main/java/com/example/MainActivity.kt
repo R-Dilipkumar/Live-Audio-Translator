@@ -36,13 +36,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var pendingMicCapture = false
+
     // Permission launcher for RECORD_AUDIO and POST_NOTIFICATIONS
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
         if (recordAudioGranted) {
-            launchScreenCaptureIntent()
+            if (pendingMicCapture) {
+                viewModel.startMicCapture()
+            } else {
+                launchScreenCaptureIntent()
+            }
         } else {
             viewModel.showError("Audio recording permission is required to capture sound.")
             Toast.makeText(this, "Permission denied: Audio Recording", Toast.LENGTH_SHORT).show()
@@ -69,7 +75,7 @@ class MainActivity : ComponentActivity() {
             MyApplicationTheme {
                 MainScreen(
                     viewModel = viewModel,
-                    onRequestCapturePermission = { checkAndRequestPermissions() },
+                    onRequestCapturePermission = { isMic -> checkAndRequestPermissions(isMic) },
                     onRequestOverlayPermission = { requestFloatingOverlay() }
                 )
             }
@@ -103,7 +109,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun checkAndRequestPermissions() {
+    private fun checkAndRequestPermissions(isMic: Boolean = false) {
+        pendingMicCapture = isMic
         val permissionsToRequest = mutableListOf<String>()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
@@ -123,7 +130,11 @@ class MainActivity : ComponentActivity() {
         if (permissionsToRequest.isNotEmpty()) {
             permissionLauncher.launch(permissionsToRequest.toTypedArray())
         } else {
-            launchScreenCaptureIntent()
+            if (isMic) {
+                viewModel.startMicCapture()
+            } else {
+                launchScreenCaptureIntent()
+            }
         }
     }
 

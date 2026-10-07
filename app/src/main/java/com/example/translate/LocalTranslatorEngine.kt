@@ -164,6 +164,7 @@ class LocalTranslatorEngine(private val context: Context) {
         if (!src.isAutoDetect) {
             _sourceLanguage.value = tgt
             _targetLanguage.value = src
+            lastStableTranslation = null
             scope.launch { checkAndPrepareTranslator() }
         }
     }
@@ -475,13 +476,11 @@ class LocalTranslatorEngine(private val context: Context) {
                 Log.e(TAG, "Translation execution failed", error)
                 val msg = "Translation error: ${error.localizedMessage}"
                 NotificationHelper.showErrorNotification(context, "Translation Engine Error", msg)
-                // Use fallback cache so the overlay retains the last stable translated sentence
-                val fallbackText = lastStableTranslation ?: "[Translation in progress…]"
                 scope.launch {
                     emitTranslation(
                         TranslationResult(
                             originalText = text,
-                            translatedText = fallbackText,
+                            translatedText = "[Translation unavailable]",
                             sourceLangCode = srcCode,
                             targetLangCode = tgtCode,
                             detectedSourceLanguage = detectedLang
@@ -491,14 +490,18 @@ class LocalTranslatorEngine(private val context: Context) {
             }
     }
 
+    private val translationLock = Any()
+
     private suspend fun emitTranslation(result: TranslationResult) {
-        val currentList = _recentTranslations.value.toMutableList()
-        currentList.add(result)
-        if (currentList.size > 20) {
-            currentList.removeAt(0)
+        synchronized(translationLock) {
+            val currentList = _recentTranslations.value.toMutableList()
+            currentList.add(result)
+            if (currentList.size > 20) {
+                currentList.removeAt(0)
+            }
+            _recentTranslations.value = currentList
+            _latestTranslation.value = result
         }
-        _recentTranslations.value = currentList
-        _latestTranslation.value = result
         _translationFlow.emit(result)
     }
 

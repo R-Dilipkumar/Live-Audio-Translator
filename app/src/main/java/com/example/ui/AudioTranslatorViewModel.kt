@@ -122,6 +122,16 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
+        // Hydrate latest translation if service has already processed speech before ViewModel creation
+        translatorEngine.latestTranslation.value?.let { initial ->
+            if (initial.originalText.isNotBlank()) {
+                _currentOriginalSpeech.value = initial.originalText
+            }
+            if (initial.translatedText.isNotBlank()) {
+                _currentTranslatedSpeech.value = initial.translatedText
+            }
+        }
+
         // Collect recognized speech from ASR engine and feed to translator if capture service is not active
         viewModelScope.launch {
             speechEngine.recognizedTextFlow.collect { text ->

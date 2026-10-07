@@ -12,7 +12,9 @@ object AudioUtils {
      * Each pair [left, right] is averaged: (left + right) / 2.
      */
     fun downmixStereoToMono(stereoBuffer: ShortArray, readShorts: Int): ShortArray {
-        val monoLength = readShorts / 2
+        val validRead = min(readShorts, stereoBuffer.size)
+        if (validRead <= 0) return ShortArray(0)
+        val monoLength = validRead / 2
         val mono = ShortArray(monoLength)
         for (i in 0 until monoLength) {
             val left = stereoBuffer[i * 2].toInt()
@@ -31,17 +33,18 @@ object AudioUtils {
         inSampleRate: Int,
         outSampleRate: Int = 16000
     ): ShortArray {
-        if (inSampleRate == outSampleRate || input.isEmpty()) {
+        if (inSampleRate <= 0 || outSampleRate <= 0 || inSampleRate == outSampleRate || input.isEmpty()) {
             return input
         }
 
         val ratio = inSampleRate.toDouble() / outSampleRate.toDouble()
-        val outLength = (input.size / ratio).toInt()
+        val outLength = (input.size.toLong() * outSampleRate / inSampleRate).toInt()
+        if (outLength <= 0) return ShortArray(0)
         val output = ShortArray(outLength)
 
         for (i in 0 until outLength) {
             val srcIndex = i * ratio
-            val indexFloor = srcIndex.toInt()
+            val indexFloor = min(srcIndex.toInt(), input.size - 1)
             val indexCeil = min(indexFloor + 1, input.size - 1)
             val fraction = (srcIndex - indexFloor).toFloat()
 
@@ -78,10 +81,11 @@ object AudioUtils {
         val monoShorts = if (isStereo) {
             downmixStereoToMono(stereoPcmBuffer, readShorts)
         } else {
-            stereoPcmBuffer.copyOf(readShorts)
+            val validRead = min(readShorts, stereoPcmBuffer.size)
+            if (validRead <= 0) ShortArray(0) else stereoPcmBuffer.copyOf(validRead)
         }
 
-        val resampledShorts = if (sampleRate != 16000) {
+        val resampledShorts = if (sampleRate > 0 && sampleRate != 16000) {
             resampleLinear(monoShorts, sampleRate, 16000)
         } else {
             monoShorts
@@ -98,11 +102,16 @@ object AudioUtils {
         if (samples.isEmpty()) return 0f
         var sumSquares = 0.0
         for (s in samples) {
-            sumSquares += (s * s).toDouble()
+            val v = s.toDouble()
+            if (!v.isNaN() && !v.isInfinite()) {
+                sumSquares += (v * v)
+            }
         }
+        if (sumSquares <= 0.0 || sumSquares.isNaN() || sumSquares.isInfinite()) return 0f
         val rms = sqrt(sumSquares / samples.size)
-        if (rms < 0.0001) return 0f
+        if (rms < 0.0001 || rms.isNaN() || rms.isInfinite()) return 0f
         val db = 20.0 * log10(rms) // Typically -60dB to 0dB
+        if (db.isNaN() || db.isInfinite()) return 0f
         // Normalize -60dB -> 0%, 0dB -> 100%
         val normalized = ((db + 60.0) / 60.0).toFloat().coerceIn(0f, 1f)
         return normalized * 100f

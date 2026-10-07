@@ -105,6 +105,8 @@ class VoiceIsolationProcessor(
         noiseGateThreshold: Float = 0.015f,
         isFilterEnabled: Boolean = true
     ): FloatArray {
+        if (input.isEmpty()) return FloatArray(0)
+
         val output = FloatArray(input.size)
 
         var sumSquare = 0.0

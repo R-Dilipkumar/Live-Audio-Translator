@@ -117,5 +117,76 @@ class ExampleUnitTest {
         assertEquals("Third sentence.", max3[1])
         assertEquals("Fourth sentence.", max3[2])
     }
+
+    @Test
+    fun testAudioUtilsResampleEdgeCases() {
+        // Empty input returns empty/same
+        val empty = ShortArray(0)
+        assertEquals(0, AudioUtils.resampleLinear(empty, 48000, 16000).size)
+
+        // Invalid sample rates should return original without crashing
+        val sample = shortArrayOf(10, 20, 30)
+        assertEquals(3, AudioUtils.resampleLinear(sample, 0, 16000).size)
+        assertEquals(3, AudioUtils.resampleLinear(sample, 48000, 0).size)
+        assertEquals(3, AudioUtils.resampleLinear(sample, -48000, 16000).size)
+
+        // Same sample rate returns input directly
+        val same = AudioUtils.resampleLinear(sample, 16000, 16000)
+        assertEquals(sample, same)
+
+        // Single sample should not throw IndexOutOfBoundsException
+        val single = shortArrayOf(100)
+        val downsampledSingle = AudioUtils.resampleLinear(single, 48000, 16000)
+        assertEquals(0, downsampledSingle.size) // 1 * 16000 / 48000 = 0
+    }
+
+    @Test
+    fun testAudioUtilsCalculateDbLevelRobustness() {
+        // Empty array returns 0
+        assertEquals(0f, AudioUtils.calculateDbLevel(FloatArray(0)), 0.0001f)
+
+        // Array with NaNs or Infinities should not produce NaN result
+        val dirtyFloats = floatArrayOf(Float.NaN, Float.POSITIVE_INFINITY, 0.5f, Float.NEGATIVE_INFINITY)
+        val db = AudioUtils.calculateDbLevel(dirtyFloats)
+        assertTrue(!db.isNaN() && !db.isInfinite())
+        assertTrue(db >= 0f)
+    }
+
+    @Test
+    fun testStereoToMonoDownmixBounds() {
+        val stereo = shortArrayOf(100, 200, 300, 400)
+        // Zero read shorts
+        assertEquals(0, AudioUtils.downmixStereoToMono(stereo, 0).size)
+        // Negative read shorts
+        assertEquals(0, AudioUtils.downmixStereoToMono(stereo, -4).size)
+        // Read shorts exceeding buffer size clamped safely
+        val monoClamped = AudioUtils.downmixStereoToMono(stereo, 10)
+        assertEquals(2, monoClamped.size)
+        assertEquals(150.toShort(), monoClamped[0])
+    }
+
+    @Test
+    fun testVoiceIsolationEmptyInput() {
+        val processor = com.example.audio.VoiceIsolationProcessor()
+        val emptyResult = processor.process(FloatArray(0))
+        assertEquals(0, emptyResult.size)
+    }
+
+    @Test
+    fun testZipSlipPathContainmentCheck() {
+        val targetDir = java.io.File("/data/user/0/com.example/models/model1")
+        val safeCanonicalPath = java.io.File(targetDir, "sub/file.onnx").path
+        val unsafeEscapePath = java.io.File(targetDir, "../evil.sh").canonicalPath
+        val prefixTrapPath = "/data/user/0/com.example/models/model1_fake/evil.onnx"
+
+        val targetCanonicalDirPath = targetDir.canonicalPath + java.io.File.separator
+
+        // Safe inside directory
+        assertTrue(safeCanonicalPath.startsWith(targetCanonicalDirPath) || safeCanonicalPath == targetDir.canonicalPath)
+        // Traversal escape
+        assertTrue(!unsafeEscapePath.startsWith(targetCanonicalDirPath) && unsafeEscapePath != targetDir.canonicalPath)
+        // Suffix / prefix collision trap (same prefix letters but different folder)
+        assertTrue(!prefixTrapPath.startsWith(targetCanonicalDirPath) && prefixTrapPath != targetDir.canonicalPath)
+    }
 }
 

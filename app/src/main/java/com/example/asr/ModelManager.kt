@@ -419,32 +419,33 @@ class ModelManager(private val context: Context) {
                 .url(model.downloadUrl)
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                val error = "Download failed with HTTP ${response.code}: ${response.message}"
-                cleanupPartialFiles(tempArchiveFile, targetDir, model)
-                _downloadState.value = ModelDownloadState.Error(error)
-                NotificationHelper.showErrorNotification(context, "Model Download Failed", error)
-                return@withContext
-            }
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val error = "Download failed with HTTP ${response.code}: ${response.message}"
+                    cleanupPartialFiles(tempArchiveFile, targetDir, model)
+                    _downloadState.value = ModelDownloadState.Error(error)
+                    NotificationHelper.showErrorNotification(context, "Model Download Failed", error)
+                    return@withContext
+                }
 
-            val body = response.body ?: throw IOException("Empty response body")
-            val contentLength = if (body.contentLength() > 0) body.contentLength() else model.totalSizeBytes
+                val body = response.body ?: throw IOException("Empty response body")
+                val contentLength = if (body.contentLength() > 0) body.contentLength() else model.totalSizeBytes
 
-            // Download file stream with progress tracking
-            body.byteStream().use { input ->
-                FileOutputStream(tempArchiveFile).use { output ->
-                    val buffer = ByteArray(32 * 1024)
-                    var bytesRead: Int
-                    var totalRead = 0L
+                // Download file stream with progress tracking
+                body.byteStream().use { input ->
+                    FileOutputStream(tempArchiveFile).use { output ->
+                        val buffer = ByteArray(32 * 1024)
+                        var bytesRead: Int
+                        var totalRead = 0L
 
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        output.write(buffer, 0, bytesRead)
-                        totalRead += bytesRead
-                        val progress = if (contentLength > 0) (totalRead.toFloat() / contentLength.toFloat()).coerceIn(0f, 1f) else 0f
-                        _downloadState.value = ModelDownloadState.Downloading(totalRead, contentLength, progress)
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+                            val progress = if (contentLength > 0) (totalRead.toFloat() / contentLength.toFloat()).coerceIn(0f, 1f) else 0f
+                            _downloadState.value = ModelDownloadState.Downloading(totalRead, contentLength, progress)
+                        }
+                        output.flush()
                     }
-                    output.flush()
                 }
             }
 
@@ -533,6 +534,7 @@ class ModelManager(private val context: Context) {
     }
 
     private fun extractTarBz2(archiveFile: File, targetDirectory: File) {
+        val targetCanonicalDirPath = targetDirectory.canonicalPath + File.separator
         FileInputStream(archiveFile).use { fis ->
             BufferedInputStream(fis).use { bis ->
                 BZip2CompressorInputStream(bis).use { bzIn ->
@@ -540,8 +542,9 @@ class ModelManager(private val context: Context) {
                         var entry = tarIn.nextEntry
                         while (entry != null) {
                             val newFile = File(targetDirectory, entry.name)
+                            val canonicalPath = newFile.canonicalPath
                             // Protect against Zip/Tar Slip vulnerability
-                            if (!newFile.canonicalPath.startsWith(targetDirectory.canonicalPath)) {
+                            if (!canonicalPath.startsWith(targetCanonicalDirPath) && canonicalPath != targetDirectory.canonicalPath) {
                                 throw SecurityException("Tar entry is outside of target dir: ${entry.name}")
                             }
                             if (entry.isDirectory) {
@@ -561,12 +564,14 @@ class ModelManager(private val context: Context) {
     }
 
     private fun unzip(zipFile: File, targetDirectory: File) {
+        val targetCanonicalDirPath = targetDirectory.canonicalPath + File.separator
         ZipInputStream(BufferedInputStream(FileInputStream(zipFile))).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
                 val newFile = File(targetDirectory, entry.name)
+                val canonicalPath = newFile.canonicalPath
                 // Protect against Zip Slip vulnerability
-                if (!newFile.canonicalPath.startsWith(targetDirectory.canonicalPath)) {
+                if (!canonicalPath.startsWith(targetCanonicalDirPath) && canonicalPath != targetDirectory.canonicalPath) {
                     throw SecurityException("Zip entry is outside of target dir: ${entry.name}")
                 }
                 if (entry.isDirectory) {

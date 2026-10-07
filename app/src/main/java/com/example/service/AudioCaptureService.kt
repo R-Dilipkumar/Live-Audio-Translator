@@ -44,13 +44,13 @@ class AudioCaptureService : Service() {
 
     private var mediaProjection: MediaProjection? = null
     private var audioRecord: AudioRecord? = null
-    private var isCapturing = false
+    @Volatile private var isCapturing = false
     private var wakeLock: PowerManager.WakeLock? = null
 
     // Audio Pre-processing: Voice isolation (IIR Biquad 150Hz - 3500Hz) & Noise Gate
     private val voiceIsolationProcessor = VoiceIsolationProcessor()
-    private var isVoiceIsolationActive = true
-    private var noiseGateLevel = 0.015f
+    @Volatile private var isVoiceIsolationActive = true
+    @Volatile private var noiseGateLevel = 0.015f
     private var settingsObserverJob: Job? = null
 
     companion object {

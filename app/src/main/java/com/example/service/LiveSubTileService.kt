@@ -9,6 +9,7 @@ import android.service.quicksettings.TileService
 import com.example.overlay.FloatingSubtitleService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -16,12 +17,13 @@ import kotlinx.coroutines.launch
 class LiveSubTileService : TileService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var listeningJob: Job? = null
 
     override fun onStartListening() {
         super.onStartListening()
         updateTileState()
-        // Collect live running state
-        serviceScope.launch {
+        listeningJob?.cancel()
+        listeningJob = serviceScope.launch {
             AudioCaptureService.isServiceRunning.collect { isRunning ->
                 val tile = qsTile ?: return@collect
                 tile.state = if (isRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
@@ -33,7 +35,14 @@ class LiveSubTileService : TileService() {
 
     override fun onStopListening() {
         super.onStopListening()
+        listeningJob?.cancel()
+        listeningJob = null
+    }
+
+    override fun onDestroy() {
+        listeningJob?.cancel()
         serviceScope.cancel()
+        super.onDestroy()
     }
 
     override fun onClick() {

@@ -51,6 +51,7 @@ class SpeechRecognizerEngine(
 
     private var onlineRecognizer: OnlineRecognizer? = null
     private var onlineStream: OnlineStream? = null
+    private val recognizerLock = Any()
     private var lastEmittedText = ""
     private var streamEmittedLength = 0
     private var isSherpaLoaded = false
@@ -157,8 +158,10 @@ class SpeechRecognizerEngine(
                 config = recognizerConfig
             )
 
-            onlineRecognizer = recognizer
-            onlineStream = recognizer.createStream()
+            synchronized(recognizerLock) {
+                onlineRecognizer = recognizer
+                onlineStream = recognizer.createStream()
+            }
             _engineState.value = RecognizerState.Ready
             Log.i(TAG, "Sherpa-ONNX speech recognizer initialized successfully")
             return true
@@ -176,119 +179,94 @@ class SpeechRecognizerEngine(
      * Feeds 16 kHz float PCM samples to the speech recognizer in consistent 0.1s chunks (1600 samples).
      */
     fun feedAudioSamples(samples: FloatArray) {
-        val recognizer = onlineRecognizer
-        val stream = onlineStream
-
-        if (recognizer != null && stream != null) {
-            try {
-                _engineState.value = RecognizerState.Listening
-
-                // BUG 3 FIX: Initialize watchdog timestamps on the very first audio frame
-                // to avoid premature watchdog firing caused by model-load lag.
-                if (!audioFeedingStarted) {
-                    val now = System.currentTimeMillis()
-                    continuousAudioStartTime = now
-                    lastOutputOrResetTime = now
-                    audioFeedingStarted = true
+        val chunksToProcess = mutableListOf<FloatArray>()
+        synchronized(pcmChunkAccumulator) {
+            for (sample in samples) {
+                pcmChunkAccumulator.addLast(sample)
+            }
+            while (pcmChunkAccumulator.size >= CHUNK_SIZE_SAMPLES) {
+                val chunk = FloatArray(CHUNK_SIZE_SAMPLES)
+                for (i in 0 until CHUNK_SIZE_SAMPLES) {
+                    chunk[i] = pcmChunkAccumulator.removeFirst()
                 }
+                chunksToProcess.add(chunk)
+            }
+        }
 
-                val chunksToProcess = mutableListOf<FloatArray>()
-                synchronized(pcmChunkAccumulator) {
-                    for (sample in samples) {
-                        pcmChunkAccumulator.addLast(sample)
+        synchronized(recognizerLock) {
+            val recognizer = onlineRecognizer
+            val stream = onlineStream
+
+            if (recognizer != null && stream != null) {
+                try {
+                    _engineState.value = RecognizerState.Listening
+
+                    // BUG 3 FIX: Initialize watchdog timestamps on the very first audio frame
+                    // to avoid premature watchdog firing caused by model-load lag.
+                    if (!audioFeedingStarted) {
+                        val now = System.currentTimeMillis()
+                        continuousAudioStartTime = now
+                        lastOutputOrResetTime = now
+                        audioFeedingStarted = true
                     }
-                    while (pcmChunkAccumulator.size >= CHUNK_SIZE_SAMPLES) {
-                        val chunk = FloatArray(CHUNK_SIZE_SAMPLES)
-                        for (i in 0 until CHUNK_SIZE_SAMPLES) {
-                            chunk[i] = pcmChunkAccumulator[i]
+
+                    for (chunk in chunksToProcess) {
+                        stream.acceptWaveform(chunk, 16000)
+
+                        while (recognizer.isReady(stream)) {
+                            recognizer.decode(stream)
                         }
-                        // BUG 7 FIX: removeFirst() is O(1) on ArrayDeque vs O(n) subList().clear()
-                        repeat(CHUNK_SIZE_SAMPLES) { pcmChunkAccumulator.removeFirst() }
-                        chunksToProcess.add(chunk)
-                    }
-                }
 
-                for (chunk in chunksToProcess) {
-                    stream.acceptWaveform(chunk, 16000)
+                        val result = recognizer.getResult(stream)
+                        val fullText = result.text
 
-                    while (recognizer.isReady(stream)) {
-                        recognizer.decode(stream)
-                    }
-
-                    val result = recognizer.getResult(stream)
-                    val fullText = result.text
-
-                    // Sentence-level buffering: find punctuation boundaries (. , ? ! etc.)
-                    // to extract complete clauses before passing to translation
-                    val punctuationMarks = charArrayOf('.', ',', '?', '!', '。', '，', '？', '！', ';', '；', ':')
-                    var uncommitted = if (streamEmittedLength < fullText.length) {
-                        fullText.substring(streamEmittedLength)
-                    } else {
-                        ""
-                    }
-
-                    var punctIndex = uncommitted.indexOfAny(punctuationMarks)
-                    while (punctIndex >= 0) {
-                        val completeClause = uncommitted.substring(0, punctIndex + 1).trim()
-                        if (completeClause.isNotBlank()) {
-                            Log.d(TAG, "Punctuation boundary sentence detected: $completeClause")
-                            lastOutputOrResetTime = System.currentTimeMillis()
-                            scope.launch {
-                                _recognizedTextFlow.emit(completeClause)
-                            }
-                        }
-                        streamEmittedLength += (punctIndex + 1)
-                        uncommitted = if (streamEmittedLength < fullText.length) {
+                        // Sentence-level buffering: find punctuation boundaries (. , ? ! etc.)
+                        // to extract complete clauses before passing to translation
+                        val punctuationMarks = charArrayOf('.', ',', '?', '!', '。', '，', '？', '！', ';', '；', ':')
+                        var uncommitted = if (streamEmittedLength < fullText.length) {
                             fullText.substring(streamEmittedLength)
                         } else {
                             ""
                         }
-                        punctIndex = uncommitted.indexOfAny(punctuationMarks)
-                    }
 
-                    // Any trailing in-progress clause is shown as partial
-                    val currentPartial = if (streamEmittedLength < fullText.length) {
-                        fullText.substring(streamEmittedLength).trim()
-                    } else {
-                        ""
-                    }
+                        var punctIndex = uncommitted.indexOfAny(punctuationMarks)
+                        while (punctIndex >= 0) {
+                            val completeClause = uncommitted.substring(0, punctIndex + 1).trim()
+                            if (completeClause.isNotBlank()) {
+                                Log.d(TAG, "Punctuation boundary sentence detected: $completeClause")
+                                lastOutputOrResetTime = System.currentTimeMillis()
+                                emitSentence(completeClause)
+                            }
+                            streamEmittedLength += (punctIndex + 1)
+                            uncommitted = if (streamEmittedLength < fullText.length) {
+                                fullText.substring(streamEmittedLength)
+                            } else {
+                                ""
+                            }
+                            punctIndex = uncommitted.indexOfAny(punctuationMarks)
+                        }
 
-                    if (currentPartial != _partialTextFlow.value) {
-                        _partialTextFlow.value = currentPartial
-                    }
-
-                    val isEndpoint = recognizer.isEndpoint(stream)
-                    if (isEndpoint) {
-                        val finalClause = if (streamEmittedLength < fullText.length) {
+                        // Any trailing in-progress clause is shown as partial
+                        val currentPartial = if (streamEmittedLength < fullText.length) {
                             fullText.substring(streamEmittedLength).trim()
                         } else {
                             ""
                         }
-                        if (finalClause.isNotBlank()) {
-                            Log.d(TAG, "Speech endpoint reached: $finalClause")
-                            scope.launch {
-                                _recognizedTextFlow.emit(finalClause)
-                            }
-                        }
-                        streamEmittedLength = 0
-                        lastEmittedText = ""
-                        _partialTextFlow.value = ""
-                        lastOutputOrResetTime = System.currentTimeMillis()
-                        recognizer.reset(stream)
-                    }
 
-                    // Anti-Freeze Watchdog:
-                    // If continuous audio processing occurs for > 6 seconds without any output or endpointing,
-                    // automatically flush/reset the stream to recover from stalled decoder states
-                    if (isAntiFreezeWatchdogEnabled) {
-                        val timeSinceLast = System.currentTimeMillis() - lastOutputOrResetTime
-                        if (timeSinceLast >= 6000L) {
-                            Log.w(TAG, "Anti-Freeze Watchdog: 6 seconds of audio with no output. Auto-recovering stream.")
-                            val stalledText = fullText.substring(streamEmittedLength.coerceAtMost(fullText.length)).trim()
-                            if (stalledText.isNotBlank()) {
-                                scope.launch {
-                                    _recognizedTextFlow.emit(stalledText)
-                                }
+                        if (currentPartial != _partialTextFlow.value) {
+                            _partialTextFlow.value = currentPartial
+                        }
+
+                        val isEndpoint = recognizer.isEndpoint(stream)
+                        if (isEndpoint) {
+                            val finalClause = if (streamEmittedLength < fullText.length) {
+                                fullText.substring(streamEmittedLength).trim()
+                            } else {
+                                ""
+                            }
+                            if (finalClause.isNotBlank()) {
+                                Log.d(TAG, "Speech endpoint reached: $finalClause")
+                                emitSentence(finalClause)
                             }
                             streamEmittedLength = 0
                             lastEmittedText = ""
@@ -296,17 +274,44 @@ class SpeechRecognizerEngine(
                             lastOutputOrResetTime = System.currentTimeMillis()
                             recognizer.reset(stream)
                         }
+
+                        // Anti-Freeze Watchdog:
+                        // If continuous audio processing occurs for > 6 seconds without any output or endpointing,
+                        // automatically flush/reset the stream to recover from stalled decoder states
+                        if (isAntiFreezeWatchdogEnabled) {
+                            val timeSinceLast = System.currentTimeMillis() - lastOutputOrResetTime
+                            if (timeSinceLast >= 6000L) {
+                                Log.w(TAG, "Anti-Freeze Watchdog: 6 seconds of audio with no output. Auto-recovering stream.")
+                                val stalledText = fullText.substring(streamEmittedLength.coerceAtMost(fullText.length)).trim()
+                                if (stalledText.isNotBlank()) {
+                                    emitSentence(stalledText)
+                                }
+                                streamEmittedLength = 0
+                                lastEmittedText = ""
+                                _partialTextFlow.value = ""
+                                lastOutputOrResetTime = System.currentTimeMillis()
+                                recognizer.reset(stream)
+                            }
+                        }
                     }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Runtime error in speech recognizer loop", t)
+                    val error = "Speech recognizer runtime error: ${t.localizedMessage}"
+                    _engineState.value = RecognizerState.Error(error)
+                    NotificationHelper.showErrorNotification(context, "ASR Runtime Error", error)
                 }
-            } catch (t: Throwable) {
-                Log.e(TAG, "Runtime error in speech recognizer loop", t)
-                val error = "Speech recognizer runtime error: ${t.localizedMessage}"
-                _engineState.value = RecognizerState.Error(error)
-                NotificationHelper.showErrorNotification(context, "ASR Runtime Error", error)
+            } else {
+                // Acoustic speech detector fallback if model not loaded
+                detectAcousticSpeech(samples)
             }
-        } else {
-            // Acoustic speech detector fallback if model not loaded
-            detectAcousticSpeech(samples)
+        }
+    }
+
+    private fun emitSentence(clause: String) {
+        if (!_recognizedTextFlow.tryEmit(clause)) {
+            scope.launch {
+                _recognizedTextFlow.emit(clause)
+            }
         }
     }
 
@@ -335,9 +340,7 @@ class SpeechRecognizerEngine(
                     "Translating internal media stream."
                 )
                 val phrase = placeholderPhrases[(System.currentTimeMillis() / 4000 % placeholderPhrases.size).toInt()]
-                scope.launch {
-                    _recognizedTextFlow.emit(phrase)
-                }
+                emitSentence(phrase)
             }
             speechFramesCount = 0
             energyAccumulator = 0f
@@ -350,9 +353,7 @@ class SpeechRecognizerEngine(
     fun flushCurrentSegment() {
         val current = _partialTextFlow.value.trim()
         if (current.isNotEmpty()) {
-            scope.launch {
-                _recognizedTextFlow.emit(current)
-            }
+            emitSentence(current)
             _partialTextFlow.value = ""
             lastEmittedText = ""
             streamEmittedLength = 0
@@ -363,20 +364,22 @@ class SpeechRecognizerEngine(
     }
 
     fun release() {
-        try {
-            onlineStream?.release()
-            onlineRecognizer?.release()
-        } catch (t: Throwable) {
-            Log.e(TAG, "Error releasing recognizer native pointers", t)
-        } finally {
-            onlineStream = null
-            onlineRecognizer = null
-            streamEmittedLength = 0
-            audioFeedingStarted = false
-            synchronized(pcmChunkAccumulator) {
-                pcmChunkAccumulator.clear()
+        synchronized(recognizerLock) {
+            try {
+                onlineStream?.release()
+                onlineRecognizer?.release()
+            } catch (t: Throwable) {
+                Log.e(TAG, "Error releasing recognizer native pointers", t)
+            } finally {
+                onlineStream = null
+                onlineRecognizer = null
+                streamEmittedLength = 0
+                audioFeedingStarted = false
+                synchronized(pcmChunkAccumulator) {
+                    pcmChunkAccumulator.clear()
+                }
+                _engineState.value = RecognizerState.Uninitialized
             }
-            _engineState.value = RecognizerState.Uninitialized
         }
     }
 }
