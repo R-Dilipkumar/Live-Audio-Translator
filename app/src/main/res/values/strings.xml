@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">LiveAudio Translate</string>
+    <string name="capture_service_running">Live Audio Capture Active</string>
+    <string name="capture_service_desc">Capturing and translating device internal audio</string>
+    <string name="action_stop">Stop</string>
+    <string name="channel_capture_name">Audio Capture Service</string>
+    <string name="channel_capture_desc">Notifications for ongoing internal audio capture</string>
+    <string name="channel_error_name">Audio Translation Alerts</string>
+    <string name="channel_error_desc">Alerts for translation and capture errors</string>
+    <string name="tile_label">Live Subtitles</string>
+</resources>

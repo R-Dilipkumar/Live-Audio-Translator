@@ -1,0 +1,6 @@
+{
+  "name": "LiveAudio Translate",
+  "description": "Offline real-time internal audio transcription and translation for videos, games, and streaming apps.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
