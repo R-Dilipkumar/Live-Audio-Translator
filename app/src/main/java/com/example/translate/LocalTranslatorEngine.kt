@@ -16,6 +16,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -112,8 +113,24 @@ class LocalTranslatorEngine(private val context: Context) {
     val latestTranslation: StateFlow<TranslationResult?> = _latestTranslation.asStateFlow()
 
     private var activeTranslator: Translator? = null
-    // Cache translators dynamically for detected languages
-    private val translatorCache = mutableMapOf<String, Translator>()
+    private val maxCacheSize = 3
+    private val cacheLock = Any()
+    // LRU cache bounded to max 3 translators (each holds ~30-50MB native RAM).
+    // Automatically invokes .close() on evicted instances to prevent native memory leaks and OutOfMemoryError.
+    private val translatorCache = object : LinkedHashMap<String, Translator>(4, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Translator>?): Boolean {
+            if (size > maxCacheSize) {
+                try {
+                    eldest?.value?.close()
+                    Log.d(TAG, "Evicted translator for ${eldest?.key} from LRU cache to reclaim native RAM")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed closing evicted translator: ${e.message}")
+                }
+                return true
+            }
+            return false
+        }
+    }
 
     // Retained previously identified language for confidence threshold fallback
     private var lastIdentifiedLanguage: String = TranslateLanguage.JAPANESE
@@ -310,7 +327,18 @@ class LocalTranslatorEngine(private val context: Context) {
         try {
             val model = TranslateRemoteModel.Builder(langCode).build()
             modelManager.deleteDownloadedModel(model).await()
-            translatorCache.remove(langCode)
+            synchronized(cacheLock) {
+                val iterator = translatorCache.entries.iterator()
+                while (iterator.hasNext()) {
+                    val entry = iterator.next()
+                    if (entry.key.startsWith("${langCode}_") || entry.key.endsWith("_$langCode")) {
+                        try {
+                            entry.value.close()
+                        } catch (_: Exception) {}
+                        iterator.remove()
+                    }
+                }
+            }
             refreshDownloadedLanguages()
             checkAndPrepareTranslator()
             true
@@ -348,7 +376,9 @@ class LocalTranslatorEngine(private val context: Context) {
      */
     private suspend fun getOrCreateTranslator(srcCode: String, tgtCode: String): Translator? = withContext(Dispatchers.IO) {
         val key = "${srcCode}_$tgtCode"
-        translatorCache[key]?.let { return@withContext it }
+        synchronized(cacheLock) {
+            translatorCache[key]?.let { return@withContext it }
+        }
 
         try {
             val options = TranslatorOptions.Builder()
@@ -358,7 +388,9 @@ class LocalTranslatorEngine(private val context: Context) {
             val translator = Translation.getClient(options)
             // Ensure models downloaded
             translator.downloadModelIfNeeded(DownloadConditions.Builder().build()).await()
-            translatorCache[key] = translator
+            synchronized(cacheLock) {
+                translatorCache[key] = translator
+            }
             refreshDownloadedLanguages()
             translator
         } catch (e: Exception) {
@@ -532,11 +564,16 @@ class LocalTranslatorEngine(private val context: Context) {
 
     fun release() {
         try {
+            scope.cancel()
             activeTranslator?.close()
-            translatorCache.values.forEach { it.close() }
-            translatorCache.clear()
+            activeTranslator = null
+            synchronized(cacheLock) {
+                translatorCache.values.forEach { 
+                    try { it.close() } catch (_: Exception) {}
+                }
+                translatorCache.clear()
+            }
             languageIdentifier.close()
         } catch (_: Exception) {}
-        activeTranslator = null
     }
 }

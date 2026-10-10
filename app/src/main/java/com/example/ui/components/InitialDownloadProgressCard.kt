@@ -96,9 +96,9 @@ fun InitialDownloadProgressCard(
                             )
                         }
 
-                        if (isAsrDownloading) {
-                            val state = asrState as ModelDownloadState.Downloading
-                            val percent = (state.progress * 100).toInt().coerceIn(0, 100)
+                        val downloadingState = asrState as? ModelDownloadState.Downloading
+                        if (downloadingState != null) {
+                            val percent = (downloadingState.progress * 100).toInt().coerceIn(0, 100)
                             Text(
                                 text = "$percent%",
                                 style = MaterialTheme.typography.titleMedium,
@@ -110,10 +110,10 @@ fun InitialDownloadProgressCard(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    if (isAsrDownloading) {
-                        val state = asrState as ModelDownloadState.Downloading
+                    val downloadingState = asrState as? ModelDownloadState.Downloading
+                    if (downloadingState != null) {
                         LinearProgressIndicator(
-                            progress = { state.progress },
+                            progress = { downloadingState.progress },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(8.dp)
@@ -127,8 +127,8 @@ fun InitialDownloadProgressCard(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            val dlMb = state.bytesDownloaded / (1024 * 1024)
-                            val totMb = state.totalBytes / (1024 * 1024)
+                            val dlMb = downloadingState.bytesDownloaded / (1024 * 1024)
+                            val totMb = downloadingState.totalBytes / (1024 * 1024)
                             Text(
                                 text = "$dlMb MB / $totMb MB",
                                 style = MaterialTheme.typography.labelSmall,

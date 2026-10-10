@@ -145,7 +145,7 @@ class AudioCaptureService : Service() {
             }
 
             ACTION_START_INTERNAL_CAPTURE -> {
-                // Safeguard Android 14+: startForeground MUST be called BEFORE acquiring MediaProjection
+                // Android 14 requirement: Promote to foreground service of type MEDIA_PROJECTION FIRST
                 startForegroundWithMediaProjection()
 
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, android.app.Activity.RESULT_OK)
@@ -158,25 +158,56 @@ class AudioCaptureService : Service() {
                         ?: @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_RESULT_DATA)
                 }
 
-                if (resultData != null) {
-                    startInternalPlaybackCapture(resultCode, resultData)
-                } else {
+                if (resultData == null) {
                     Log.e(TAG, "Invalid MediaProjection extras in intent")
                     NotificationHelper.showErrorNotification(
                         this,
                         "Capture Permission Error",
                         "Missing MediaProjection token to capture internal audio."
                     )
-                    // BUG 9 FIX: Remove the foreground notification before stopping to avoid
-                    // a notification flash when resultData is null
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        stopForeground(true)
-                    }
+                    stopCapture()
                     stopSelf()
+                    return START_NOT_STICKY
                 }
+
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    NotificationHelper.showErrorNotification(
+                        this,
+                        "Unsupported Android Version",
+                        "Internal audio playback capture requires Android 10 (API 29) or higher."
+                    )
+                    stopCapture()
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+
+                val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+                if (projectionManager == null) {
+                    Log.e(TAG, "MediaProjectionManager not available")
+                    NotificationHelper.showErrorNotification(this, "Capture Error", "MediaProjection service not available.")
+                    stopCapture()
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+
+                val projection = try {
+                    projectionManager.getMediaProjection(resultCode, resultData)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to get MediaProjection token: ${e.message}", e)
+                    null
+                }
+
+                if (projection == null) {
+                    Log.e(TAG, "MediaProjection token denied or null")
+                    NotificationHelper.showErrorNotification(this, "Capture Denied", "System denied access to screen/audio capture.")
+                    stopCapture()
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+
+                mediaProjection = projection
+
+                startInternalPlaybackCaptureWithProjection(projection)
             }
 
             ACTION_START_MIC_CAPTURE -> {
@@ -279,7 +310,7 @@ class AudioCaptureService : Service() {
         }
     }
 
-    private fun startInternalPlaybackCapture(resultCode: Int, resultData: Intent) {
+    private fun startInternalPlaybackCaptureWithProjection(projection: MediaProjection) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             NotificationHelper.showErrorNotification(
                 this,
@@ -291,21 +322,7 @@ class AudioCaptureService : Service() {
         }
 
         try {
-            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
-            if (projectionManager == null) {
-                NotificationHelper.showErrorNotification(this, "Capture Error", "MediaProjection service not available.")
-                stopSelf()
-                return
-            }
-
-            mediaProjection = projectionManager.getMediaProjection(resultCode, resultData)
-            if (mediaProjection == null) {
-                NotificationHelper.showErrorNotification(this, "Capture Denied", "System denied access to screen/audio capture.")
-                stopSelf()
-                return
-            }
-
-            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+            projection.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
                     super.onStop()
                     Log.w(TAG, "MediaProjection session terminated by user or system")
@@ -315,7 +332,7 @@ class AudioCaptureService : Service() {
             }, null)
 
             // Setup AudioPlaybackCaptureConfiguration with USAGE_MEDIA, USAGE_GAME, USAGE_UNKNOWN
-            val captureConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection!!)
+            val captureConfig = AudioPlaybackCaptureConfiguration.Builder(projection)
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
                 .addMatchingUsage(AudioAttributes.USAGE_GAME)
                 .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)

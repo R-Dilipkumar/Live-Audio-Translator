@@ -58,6 +58,10 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     val downloadingPacks: StateFlow<Map<String, Int>> = translatorEngine.downloadingPacks
     val lastDetectedLanguage: StateFlow<String?> = translatorEngine.lastDetectedLanguage
 
+    // Offloaded storage and readiness state flows (prevent Choreographer frame drops)
+    val availableStorageMb: StateFlow<Long> = modelManager.availableStorageMb
+    val readyModelIds: StateFlow<Set<String>> = modelManager.readyModelIds
+
     fun getAvailableStorageMb(): Long = modelManager.getAvailableStorageMb()
 
     fun downloadSingleLanguagePack(langCode: String) {
@@ -79,7 +83,7 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun isAsrModelReady(model: AsrModelConfig): Boolean {
-        return modelManager.isModelReady(model)
+        return readyModelIds.value.contains(model.id)
     }
 
     fun downloadAllModels() {

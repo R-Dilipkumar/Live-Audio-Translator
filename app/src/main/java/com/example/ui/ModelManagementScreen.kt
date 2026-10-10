@@ -77,8 +77,8 @@ fun ModelManagementScreen(
     val availableLanguages = viewModel.targetAvailableLanguages
     val downloadedLanguages by viewModel.downloadedLanguages.collectAsStateWithLifecycle()
     val downloadingPacks by viewModel.downloadingPacks.collectAsStateWithLifecycle()
-
-    val availableStorageMb = viewModel.getAvailableStorageMb()
+    val availableStorageMb by viewModel.availableStorageMb.collectAsStateWithLifecycle()
+    val readyModelIds by viewModel.readyModelIds.collectAsStateWithLifecycle()
 
     var selectedSubCategory by remember { mutableIntStateOf(0) }
     val categories = listOf("All Models", "Speech (ASR)", "Language Packs")
@@ -235,7 +235,7 @@ fun ModelManagementScreen(
                         AsrModelItemCard(
                             model = model,
                             isSelected = model.id == selectedAsrModel.id,
-                            isReady = viewModel.isAsrModelReady(model),
+                            isReady = readyModelIds.contains(model.id),
                             downloadState = if (model.id == selectedAsrModel.id) asrState else ModelDownloadState.NotDownloaded,
                             onSelect = { viewModel.selectAsrModel(model) },
                             onDownload = {
@@ -500,35 +500,67 @@ private fun AsrModelItemCard(
                 }
             }
 
-            // Progress bar if currently downloading
-            AnimatedVisibility(visible = isDownloading) {
-                val state = downloadState as ModelDownloadState.Downloading
-                Column(modifier = Modifier.padding(top = 8.dp)) {
-                    val percent = (state.progress * 100).toInt()
-                    LinearProgressIndicator(
-                        progress = { state.progress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                    )
+            // Error banner if download failed
+            val errorState = downloadState as? ModelDownloadState.Error
+            if (isSelected && errorState != null) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "${state.bytesDownloaded / (1024 * 1024)} MB / ${state.totalBytes / (1024 * 1024)} MB",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        Icon(
+                            imageVector = Icons.Default.ErrorOutline,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(16.dp)
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "$percent%",
+                            text = errorState.errorMsg,
                             style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.onErrorContainer
                         )
+                    }
+                }
+            }
+
+            // Progress bar if currently downloading
+            val downloadingState = downloadState as? ModelDownloadState.Downloading
+            AnimatedVisibility(visible = isDownloading && downloadingState != null) {
+                if (downloadingState != null) {
+                    Column(modifier = Modifier.padding(top = 8.dp)) {
+                        val percent = (downloadingState.progress * 100).toInt()
+                        LinearProgressIndicator(
+                            progress = { downloadingState.progress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "${downloadingState.bytesDownloaded / (1024 * 1024)} MB / ${downloadingState.totalBytes / (1024 * 1024)} MB",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "$percent%",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
             }

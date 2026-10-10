@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan to resolve runtime log errors, optimize ASR model decompression with 64 KB buffered streams and staged progress, eliminate main-thread jank and frame drops, improve floating subtitle overlay responsiveness with touch pass-through and a distinct drag header, and handle missing Google/Firebase services gracefully with an offline mock translator.",
+  "updatedAt":  "2026-10-10T17:18:22.695519525Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

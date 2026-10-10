@@ -12,7 +12,10 @@ import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -77,6 +80,8 @@ class SpeechRecognizerEngine(
     // on an ArrayList is O(n) because all remaining elements must be shifted left. At 10 chunks/sec
     // over a long session, this causes significant GC pressure. ArrayDeque.removeFirst() is O(1).
     private val pcmChunkAccumulator = ArrayDeque<Float>(CHUNK_SIZE_SAMPLES * 4)
+    // Pre-allocated chunk buffer to eliminate allocations on the audio processing thread (prevents GC churn)
+    private val reusableChunk = FloatArray(CHUNK_SIZE_SAMPLES)
 
     // Fallback voice activity detector for acoustic audio verification
     private var energyAccumulator = 0f
@@ -177,19 +182,12 @@ class SpeechRecognizerEngine(
 
     /**
      * Feeds 16 kHz float PCM samples to the speech recognizer in consistent 0.1s chunks (1600 samples).
+     * Uses in-place reusable buffer with ArrayDeque O(1) removal to eliminate allocation GC overhead.
      */
     fun feedAudioSamples(samples: FloatArray) {
-        val chunksToProcess = mutableListOf<FloatArray>()
         synchronized(pcmChunkAccumulator) {
             for (sample in samples) {
                 pcmChunkAccumulator.addLast(sample)
-            }
-            while (pcmChunkAccumulator.size >= CHUNK_SIZE_SAMPLES) {
-                val chunk = FloatArray(CHUNK_SIZE_SAMPLES)
-                for (i in 0 until CHUNK_SIZE_SAMPLES) {
-                    chunk[i] = pcmChunkAccumulator.removeFirst()
-                }
-                chunksToProcess.add(chunk)
             }
         }
 
@@ -210,8 +208,20 @@ class SpeechRecognizerEngine(
                         audioFeedingStarted = true
                     }
 
-                    for (chunk in chunksToProcess) {
-                        stream.acceptWaveform(chunk, 16000)
+                    while (true) {
+                        var chunkAvailable = false
+                        synchronized(pcmChunkAccumulator) {
+                            if (pcmChunkAccumulator.size >= CHUNK_SIZE_SAMPLES) {
+                                for (i in 0 until CHUNK_SIZE_SAMPLES) {
+                                    reusableChunk[i] = pcmChunkAccumulator.removeFirst()
+                                }
+                                chunkAvailable = true
+                            }
+                        }
+
+                        if (!chunkAvailable) break
+
+                        stream.acceptWaveform(reusableChunk, 16000)
 
                         while (recognizer.isReady(stream)) {
                             recognizer.decode(stream)
@@ -381,5 +391,17 @@ class SpeechRecognizerEngine(
                 _engineState.value = RecognizerState.Uninitialized
             }
         }
+    }
+
+    /**
+     * Terminates the speech recognizer, releases all native resources,
+     * and cancels internal coroutines.
+     */
+    fun terminate() {
+        release()
+        try {
+            scope.coroutineContext[Job]?.cancelChildren()
+            scope.cancel()
+        } catch (_: Exception) {}
     }
 }
