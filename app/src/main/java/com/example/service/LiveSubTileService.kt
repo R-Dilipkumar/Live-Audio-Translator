@@ -45,6 +45,7 @@ class LiveSubTileService : TileService() {
         super.onDestroy()
     }
 
+    @android.annotation.SuppressLint("StartActivityAndCollapseDeprecated")
     override fun onClick() {
         super.onClick()
         val isRunning = AudioCaptureService.isServiceRunning.value
@@ -83,7 +84,7 @@ class LiveSubTileService : TileService() {
                 )
                 startActivityAndCollapse(pendingIntent)
             } else {
-                @Suppress("DEPRECATION")
+                @Suppress("DEPRECATION", "StartActivityAndCollapseDeprecated")
                 startActivityAndCollapse(trampolineIntent)
             }
         }

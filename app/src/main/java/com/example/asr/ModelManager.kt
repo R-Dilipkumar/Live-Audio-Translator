@@ -289,29 +289,117 @@ class ModelManager(private val context: Context) {
     }
 
     /**
+     * Data class holding verified ONNX model file pointers on disk.
+     */
+    data class ResolvedModelFiles(
+        val model: AsrModelConfig,
+        val encoderFile: File,
+        val decoderFile: File,
+        val joinerFile: File,
+        val tokensFile: File
+    )
+
+    /**
      * Checks if all required model files exist and are non-empty.
      * Uses in-memory StateFlow cache to avoid blocking the main UI thread during Compose recomposition.
      */
     fun isModelReady(model: AsrModelConfig): Boolean {
-        return _readyModelIds.value.contains(model.id)
+        return _readyModelIds.value.contains(model.id) || checkModelFilesOnDisk(model)
+    }
+
+    /**
+     * Checks if the currently selected ASR model is installed and ready for inference.
+     * If another installed model is detected on disk, automatically selects it and returns true.
+     */
+    fun isModelReady(): Boolean {
+        if (isModelReady(_selectedModel.value)) return true
+        val resolved = resolveModelFiles(_selectedModel.value)
+        if (resolved != null) {
+            _selectedModel.value = resolved.model
+            return true
+        }
+        return false
     }
 
     /**
      * Checks disk files for the given model. Strictly called on Dispatchers.IO.
      */
     fun checkModelFilesOnDisk(model: AsrModelConfig): Boolean {
+        return resolveFilesForModel(model) != null
+    }
+
+    /**
+     * Resolves model files for a specific model configuration.
+     */
+    fun resolveFilesForModel(model: AsrModelConfig): ResolvedModelFiles? {
         val dir = getModelDirectory(model)
-        if (!dir.exists() || !dir.isDirectory) return false
+        if (dir.exists() && dir.isDirectory) {
+            val encoder = findFileInDir(dir, model.encoderFilename) ?: findFileByKeyword(dir, "encoder")
+            val decoder = findFileInDir(dir, model.decoderFilename) ?: findFileByKeyword(dir, "decoder")
+            val joiner = findFileInDir(dir, model.joinerFilename) ?: findFileByKeyword(dir, "joiner")
+            val tokens = findFileInDir(dir, model.tokensFilename) ?: findFileByKeyword(dir, "tokens.txt")
 
-        val encoder = findFileInDir(dir, model.encoderFilename) ?: findFileByKeyword(dir, "encoder")
-        val decoder = findFileInDir(dir, model.decoderFilename) ?: findFileByKeyword(dir, "decoder")
-        val joiner = findFileInDir(dir, model.joinerFilename) ?: findFileByKeyword(dir, "joiner")
-        val tokens = findFileInDir(dir, model.tokensFilename) ?: findFileByKeyword(dir, "tokens.txt")
-
-        return encoder != null && encoder.length() > 1000L &&
+            if (encoder != null && encoder.length() > 1000L &&
                 decoder != null && decoder.length() > 1000L &&
                 joiner != null && joiner.length() > 1000L &&
                 tokens != null && tokens.length() > 10L
+            ) {
+                return ResolvedModelFiles(model, encoder, decoder, joiner, tokens)
+            }
+        }
+        return null
+    }
+
+    /**
+     * Asynchronously and thoroughly searches for any installed ASR model across
+     * model directories, subdirectories, and app internal storage.
+     */
+    fun resolveModelFiles(preferredModel: AsrModelConfig = _selectedModel.value): ResolvedModelFiles? {
+        // 1. Check preferred model directory first
+        resolveFilesForModel(preferredModel)?.let { return it }
+
+        // 2. Check all other available models in their respective directories
+        for (model in availableModels) {
+            if (model.id != preferredModel.id) {
+                resolveFilesForModel(model)?.let {
+                    _selectedModel.value = model
+                    return it
+                }
+            }
+        }
+
+        // 3. Scan the general models directory recursively for any valid set of ONNX model files
+        scanDirForAnyValidModel(getModelsDirectory())?.let { return it }
+
+        // 4. Scan internal files directory as fallback
+        scanDirForAnyValidModel(context.filesDir)?.let { return it }
+
+        return null
+    }
+
+    private fun scanDirForAnyValidModel(rootDir: File): ResolvedModelFiles? {
+        if (!rootDir.exists() || !rootDir.isDirectory) return null
+
+        val encoder = findFileByKeyword(rootDir, "encoder")
+        val decoder = findFileByKeyword(rootDir, "decoder")
+        val joiner = findFileByKeyword(rootDir, "joiner")
+        val tokens = findFileByKeyword(rootDir, "tokens")
+
+        if (encoder != null && encoder.length() > 1000L &&
+            decoder != null && decoder.length() > 1000L &&
+            joiner != null && joiner.length() > 1000L &&
+            tokens != null && tokens.length() > 10L
+        ) {
+            // Find which model best matches by filename, or fallback to preferred
+            val matchingModel = availableModels.firstOrNull { model ->
+                model.encoderFilename.equals(encoder.name, ignoreCase = true) ||
+                        encoder.name.contains(model.id, ignoreCase = true)
+            } ?: _selectedModel.value
+
+            _selectedModel.value = matchingModel
+            return ResolvedModelFiles(matchingModel, encoder, decoder, joiner, tokens)
+        }
+        return null
     }
 
     fun checkCurrentModelStatus() {

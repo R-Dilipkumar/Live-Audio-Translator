@@ -39,5 +39,21 @@ class ExampleRobolectricTest {
         val spanishTranslated = engine.fallbackOfflineTranslate("gracias", "es", "en")
         assertEquals("Thank you", spanishTranslated)
     }
+
+    @Test
+    fun `verify speech recognizer engine transitions to error when model not ready`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val modelManager = com.example.asr.ModelManager(context)
+        val speechEngine = com.example.asr.SpeechRecognizerEngine(context, modelManager)
+
+        val ready = speechEngine.initEngine()
+        assertEquals(false, ready)
+        val state = speechEngine.engineState.value
+        org.junit.Assert.assertTrue(state is com.example.asr.RecognizerState.Error)
+        assertEquals(
+            "ASR Model not initialized. Please install model in Manage Models.",
+            (state as com.example.asr.RecognizerState.Error).message
+        )
+    }
 }
 

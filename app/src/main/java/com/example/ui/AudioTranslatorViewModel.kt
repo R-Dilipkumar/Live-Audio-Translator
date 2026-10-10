@@ -159,6 +159,31 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
             }
         }
 
+        // Collect speech recognizer engine states to show in-app error banners (e.g. uninitialized ASR model)
+        viewModelScope.launch {
+            speechEngine.engineState.collect { state ->
+                when (state) {
+                    is com.example.asr.RecognizerState.Error -> {
+                        _errorMessage.value = state.message
+                    }
+                    else -> {
+                        if (_errorMessage.value?.contains("ASR") == true) {
+                            _errorMessage.value = null
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collect service-level error messages to show in-app error banners
+        viewModelScope.launch {
+            com.example.service.AudioCaptureService.serviceErrorMessage.collect { error ->
+                if (error != null) {
+                    _errorMessage.value = error
+                }
+            }
+        }
+
         // Keep local engines and floating overlay settings synchronized with persisted AppSettings
         viewModelScope.launch {
             appSettings.collect { settings ->

@@ -69,6 +69,14 @@ class AudioCaptureService : Service() {
         private val _liveAudioDb = MutableStateFlow(0f)
         val liveAudioDb: StateFlow<Float> = _liveAudioDb.asStateFlow()
 
+        // In-app error banner message for UI
+        private val _serviceErrorMessage = MutableStateFlow<String?>(null)
+        val serviceErrorMessage: StateFlow<String?> = _serviceErrorMessage.asStateFlow()
+
+        fun clearServiceError() {
+            _serviceErrorMessage.value = null
+        }
+
         // DRM / continuous absolute silence detection state
         private val _isDrmSilenceDetected = MutableStateFlow(false)
         val isDrmSilenceDetected: StateFlow<Boolean> = _isDrmSilenceDetected.asStateFlow()
@@ -410,6 +418,21 @@ class AudioCaptureService : Service() {
     }
 
     private fun startMicrophoneCapture() {
+        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.RECORD_AUDIO
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.e(TAG, "RECORD_AUDIO permission missing for microphone capture")
+            NotificationHelper.showErrorNotification(
+                this,
+                "Microphone Permission Required",
+                "Audio recording permission is required to capture microphone audio."
+            )
+            stopSelf()
+            return
+        }
+
         try {
             val sampleRate = 16000
             val channelConfig = AudioFormat.CHANNEL_IN_MONO
@@ -417,6 +440,7 @@ class AudioCaptureService : Service() {
             val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelConfig, encoding)
             val bufferSize = (minBuf * 2).coerceAtLeast(2048)
 
+            @android.annotation.SuppressLint("MissingPermission")
             val record = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
                 sampleRate,
@@ -457,49 +481,72 @@ class AudioCaptureService : Service() {
         val speechEngine = getSpeechEngine(this)
         val translatorEngine = getTranslatorEngine(this)
         val transcriptDao = AppDatabase.getInstance(this).transcriptDao()
-        speechEngine.initEngine()
-
-        // Continuous background bridge: forward recognized speech to local translator
-        recognitionForwardJob?.cancel()
-        recognitionForwardJob = serviceScope.launch(Dispatchers.Default) {
-            speechEngine.recognizedTextFlow.collect { sentence ->
-                if (sentence.isNotBlank()) {
-                    Log.d(TAG, "Forwarding recognized speech to translator: $sentence")
-                    translatorEngine.translateText(sentence)
-                }
-            }
-        }
-
-        // Persist transcripts to Room in background even when main app is closed
-        translationPersistJob?.cancel()
-        translationPersistJob = serviceScope.launch(Dispatchers.IO) {
-            translatorEngine.translationFlow.collect { result ->
-                try {
-                    val entity = TranscriptEntity(
-                        originalText = result.originalText,
-                        translatedText = result.translatedText,
-                        sourceLanguage = result.sourceLangCode,
-                        targetLanguage = result.targetLangCode,
-                        timestamp = result.timestamp
-                    )
-                    transcriptDao.insert(entity)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed inserting transcript in background: ${e.message}")
-                }
-            }
-        }
 
         isCapturing = true
         captureJob?.cancel()
 
         captureJob = serviceScope.launch(Dispatchers.Default) {
+            // Await speechEngine.initEngine() completion before calling record.startRecording()
+            Log.i(TAG, "Initializing Sherpa-ONNX speech engine on background dispatcher before audio capture...")
+            val isEngineReady = speechEngine.initEngine()
+            if (!isEngineReady) {
+                val errorMsg = "ASR Model not initialized. Please install model in Manage Models."
+                Log.e(TAG, errorMsg)
+                _serviceErrorMessage.value = errorMsg
+                NotificationHelper.showErrorNotification(
+                    this@AudioCaptureService,
+                    "ASR Model Missing",
+                    errorMsg
+                )
+                try {
+                    record.stop()
+                    record.release()
+                } catch (_: Exception) {}
+                audioRecord = null
+                isCapturing = false
+                stopCapture()
+                stopSelf()
+                return@launch
+            }
+            _serviceErrorMessage.value = null
+
+            // Continuous background bridge: forward recognized speech to local translator
+            recognitionForwardJob?.cancel()
+            recognitionForwardJob = serviceScope.launch(Dispatchers.Default) {
+                speechEngine.recognizedTextFlow.collect { sentence ->
+                    if (sentence.isNotBlank()) {
+                        Log.d(TAG, "Forwarding recognized speech to translator: $sentence")
+                        translatorEngine.translateText(sentence)
+                    }
+                }
+            }
+
+            // Persist transcripts to Room in background even when main app is closed
+            translationPersistJob?.cancel()
+            translationPersistJob = serviceScope.launch(Dispatchers.IO) {
+                translatorEngine.translationFlow.collect { result ->
+                    try {
+                        val entity = TranscriptEntity(
+                            originalText = result.originalText,
+                            translatedText = result.translatedText,
+                            sourceLanguage = result.sourceLangCode,
+                            targetLanguage = result.targetLangCode,
+                            timestamp = result.timestamp
+                        )
+                        transcriptDao.insert(entity)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed inserting transcript in background: ${e.message}")
+                    }
+                }
+            }
+
             val shortBuffer = ShortArray(4096)
             var silenceStartMs = 0L
             val captureStartTime = System.currentTimeMillis()
 
             try {
                 record.startRecording()
-                Log.i(TAG, "Audio capture loop started")
+                Log.i(TAG, "Audio capture loop started successfully with initialized ASR engine")
 
                 while (isCapturing && isActive) {
                     val readShorts = record.read(shortBuffer, 0, shortBuffer.size)

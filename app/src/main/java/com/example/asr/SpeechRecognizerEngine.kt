@@ -16,6 +16,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -83,10 +85,6 @@ class SpeechRecognizerEngine(
     // Pre-allocated chunk buffer to eliminate allocations on the audio processing thread (prevents GC churn)
     private val reusableChunk = FloatArray(CHUNK_SIZE_SAMPLES)
 
-    // Fallback voice activity detector for acoustic audio verification
-    private var energyAccumulator = 0f
-    private var speechFramesCount = 0
-
     init {
         try {
             // Test if sherpa-onnx native library is loadable
@@ -99,34 +97,33 @@ class SpeechRecognizerEngine(
 
     /**
      * Initializes the Sherpa-ONNX online recognizer from the model directory.
+     * Verifies modelManager.isModelReady() is true, and automatically loads the selected model on a background dispatcher.
      */
-    fun initEngine(): Boolean {
-        _engineState.value = RecognizerState.Initializing
-        val currentModel = modelManager.selectedModel.value
-        val modelDir = modelManager.getModelDirectory(currentModel)
+    fun initEngine(): Boolean = runBlocking(Dispatchers.IO) {
+        synchronized(recognizerLock) {
+            if (onlineRecognizer != null && onlineStream != null && _engineState.value is RecognizerState.Ready) {
+                return@runBlocking true
+            }
+        }
 
-        if (!modelManager.isModelReady(currentModel)) {
-            val error = "Model files not found or incomplete. Please download the ASR model."
+        _engineState.value = RecognizerState.Initializing
+
+        // Verify that model files are downloaded and verified ready asynchronously across disk
+        val resolved = modelManager.resolveModelFiles(modelManager.selectedModel.value)
+        if (resolved == null) {
+            val error = "ASR Model not initialized. Please install model in Manage Models."
+            Log.w(TAG, error)
             _engineState.value = RecognizerState.Error(error)
-            NotificationHelper.showErrorNotification(context, "ASR Engine Not Ready", error)
-            return false
+            return@runBlocking false
         }
 
         try {
             release()
 
-            val encoderFile = modelManager.findFileInDir(modelDir, currentModel.encoderFilename)
-                ?: modelManager.findFileByKeyword(modelDir, "encoder")
-            val decoderFile = modelManager.findFileInDir(modelDir, currentModel.decoderFilename)
-                ?: modelManager.findFileByKeyword(modelDir, "decoder")
-            val joinerFile = modelManager.findFileInDir(modelDir, currentModel.joinerFilename)
-                ?: modelManager.findFileByKeyword(modelDir, "joiner")
-            val tokensFile = modelManager.findFileInDir(modelDir, currentModel.tokensFilename)
-                ?: modelManager.findFileByKeyword(modelDir, "tokens.txt")
-
-            if (encoderFile == null || decoderFile == null || joinerFile == null || tokensFile == null) {
-                throw IllegalStateException("Missing one or more required ONNX model files in ${modelDir.absolutePath}")
-            }
+            val encoderFile = resolved.encoderFile
+            val decoderFile = resolved.decoderFile
+            val joinerFile = resolved.joinerFile
+            val tokensFile = resolved.tokensFile
 
             val featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80)
             val transducerConfig = OnlineTransducerModelConfig(
@@ -168,15 +165,15 @@ class SpeechRecognizerEngine(
                 onlineStream = recognizer.createStream()
             }
             _engineState.value = RecognizerState.Ready
-            Log.i(TAG, "Sherpa-ONNX speech recognizer initialized successfully")
-            return true
+            Log.i(TAG, "Sherpa-ONNX speech recognizer initialized successfully with model: ${resolved.model.id}")
+            return@runBlocking true
 
         } catch (t: Throwable) {
             val error = "Failed to initialize ASR engine: ${t.localizedMessage}"
             Log.e(TAG, error, t)
             _engineState.value = RecognizerState.Error(error)
             NotificationHelper.showErrorNotification(context, "ASR Engine Crash", error)
-            return false
+            return@runBlocking false
         }
     }
 
@@ -311,8 +308,12 @@ class SpeechRecognizerEngine(
                     NotificationHelper.showErrorNotification(context, "ASR Runtime Error", error)
                 }
             } else {
-                // Acoustic speech detector fallback if model not loaded
-                detectAcousticSpeech(samples)
+                // If recognizer is not initialized, only set Error if NOT currently Initializing
+                val state = _engineState.value
+                if (state !is RecognizerState.Initializing && state !is RecognizerState.Error) {
+                    val errorMsg = "ASR Model not initialized. Please install model in Manage Models."
+                    _engineState.value = RecognizerState.Error(errorMsg)
+                }
             }
         }
     }
@@ -322,38 +323,6 @@ class SpeechRecognizerEngine(
             scope.launch {
                 _recognizedTextFlow.emit(clause)
             }
-        }
-    }
-
-    /**
-     * Fallback energy detector that segments audio activity into transcript events
-     * when the native model is not loaded yet or during initial testing.
-     */
-    private fun detectAcousticSpeech(samples: FloatArray) {
-        var frameEnergy = 0f
-        for (sample in samples) {
-            frameEnergy += abs(sample)
-        }
-        val avgEnergy = frameEnergy / samples.size.coerceAtLeast(1)
-
-        if (avgEnergy > 0.035f) {
-            speechFramesCount++
-            energyAccumulator += avgEnergy
-            _engineState.value = RecognizerState.Listening
-        } else {
-            if (speechFramesCount > 8) {
-                // Detected a burst of spoken audio
-                val placeholderPhrases = listOf(
-                    "Live audio captured from device.",
-                    "Spoken speech segment detected.",
-                    "Sound stream active and synchronized.",
-                    "Translating internal media stream."
-                )
-                val phrase = placeholderPhrases[(System.currentTimeMillis() / 4000 % placeholderPhrases.size).toInt()]
-                emitSentence(phrase)
-            }
-            speechFramesCount = 0
-            energyAccumulator = 0f
         }
     }
 
