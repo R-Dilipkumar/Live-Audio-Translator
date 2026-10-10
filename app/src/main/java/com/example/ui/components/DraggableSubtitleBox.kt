@@ -28,6 +28,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -49,6 +51,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -92,6 +95,9 @@ fun DraggableSubtitleBox(
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
 
+    val currentOnDragDelta by rememberUpdatedState(onDragDelta)
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
+
     // Animated offset coordinates for in-app fluid dragging and snapping
     val offsetX = remember { Animatable(0f) }
     val offsetY = remember { Animatable(0f) }
@@ -101,20 +107,31 @@ fun DraggableSubtitleBox(
     var isPaused by remember { mutableStateOf(settings.isPaused) }
     var showAdjustPanel by remember { mutableStateOf(false) }
 
-    // Sentence-level rolling buffers: retain recent clean sentences and roll off older ones
+    // Sentence-level rolling buffers: strictly deduplicated and limited to 2 clean lines
     var rollingSentences by remember { mutableStateOf<List<String>>(emptyList()) }
     var rollingOriginals by remember { mutableStateOf<List<String>>(emptyList()) }
     var lastSpeechTimestamp by remember { mutableStateOf(System.currentTimeMillis()) }
     var isLingeredOut by remember { mutableStateOf(false) }
 
+    // Normalize and add unique sentences without repetition
+    // Accept valid text while filtering only transient system placeholders
     androidx.compose.runtime.LaunchedEffect(translatedText) {
         val trimmed = translatedText.trim()
         if (trimmed.isNotBlank() &&
-            !trimmed.startsWith("[") &&
+            !trimmed.startsWith("[Translation Paused]") &&
             !trimmed.startsWith("Subtitles will stream") &&
-            rollingSentences.lastOrNull() != trimmed
+            !trimmed.startsWith("Translation will appear")
         ) {
-            rollingSentences = (rollingSentences + trimmed).takeLast(10)
+            // Split if translatedText contains multiple lines already
+            val incomingClauses = trimmed.split("\n").map { it.trim() }.filter { it.isNotBlank() }
+            val currentList = rollingSentences.toMutableList()
+            for (clause in incomingClauses) {
+                if (currentList.lastOrNull() != clause) {
+                    currentList.add(clause)
+                }
+            }
+            // Keep rolling buffer clean (retains up to 6, displayed as strictly maxLines)
+            rollingSentences = currentList.takeLast(6)
             lastSpeechTimestamp = System.currentTimeMillis()
             isLingeredOut = false
         }
@@ -123,10 +140,16 @@ fun DraggableSubtitleBox(
     androidx.compose.runtime.LaunchedEffect(originalText) {
         val trimmed = originalText.trim()
         if (trimmed.isNotBlank() &&
-            !trimmed.startsWith("Waiting") &&
-            rollingOriginals.lastOrNull() != trimmed
+            !trimmed.startsWith("Waiting")
         ) {
-            rollingOriginals = (rollingOriginals + trimmed).takeLast(10)
+            val incomingClauses = trimmed.split("\n").map { it.trim() }.filter { it.isNotBlank() }
+            val currentList = rollingOriginals.toMutableList()
+            for (clause in incomingClauses) {
+                if (currentList.lastOrNull() != clause) {
+                    currentList.add(clause)
+                }
+            }
+            rollingOriginals = currentList.takeLast(6)
             lastSpeechTimestamp = System.currentTimeMillis()
             isLingeredOut = false
         }
@@ -138,19 +161,19 @@ fun DraggableSubtitleBox(
         }
     }
 
-    // Subtitle Linger Time effect: clears/fades rolling subtitles after lingerTimeSeconds
+    // Subtitle Linger Time effect:
+    // When speech pauses, keep the latest translated sentences visible with stable opacity rather than wiping them to blank
     androidx.compose.runtime.LaunchedEffect(settings.lingerTimeSeconds, lastSpeechTimestamp) {
         if (settings.lingerTimeSeconds > 0f) {
             val lingerMs = (settings.lingerTimeSeconds * 1000L).toLong()
             kotlinx.coroutines.delay(lingerMs)
-            rollingSentences = emptyList()
-            rollingOriginals = emptyList()
             isLingeredOut = true
+        } else {
+            isLingeredOut = false
         }
     }
 
-    val maxLinesCount = settings.maxLines.coerceIn(1, 3)
-
+    val maxLinesCount = settings.maxLines.coerceIn(1, 2)
     val theme = settings.theme
     val configuration = LocalConfiguration.current
 
@@ -161,7 +184,6 @@ fun DraggableSubtitleBox(
         // Status bar & nav bar safety margins
         val topSafetyPx = with(density) { 12.dp.toPx() }
         val bottomSafetyPx = with(density) { 16.dp.toPx() }
-        val edgeMarginPx = with(density) { 8.dp.toPx() }
 
         // Dynamic boundary calculations
         val currentBoxW = boxSize.width.toFloat().coerceAtLeast(1f)
@@ -172,7 +194,7 @@ fun DraggableSubtitleBox(
         val minBoundY = topSafetyPx
         val maxBoundY = (containerHeightPx - currentBoxH - bottomSafetyPx).coerceAtLeast(minBoundY)
 
-        // Requirement 1: Recalculate and clamp coordinates on screen rotation (Portrait <-> Landscape)
+        // Recalculate and clamp coordinates on screen rotation
         androidx.compose.runtime.LaunchedEffect(configuration.orientation, containerWidthPx, containerHeightPx) {
             if (onDragDelta == null) {
                 val clampedX = offsetX.value.coerceIn(minBoundX, maxBoundX)
@@ -197,168 +219,179 @@ fun DraggableSubtitleBox(
             }
         }
 
+        // Sleek Cinematic Glassmorphic Container with stable bounded height (No animateContentSize to prevent BLASTBufferQueue buffer rejection)
         Box(
             modifier = Modifier
                 .then(boxOffsetModifier)
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp)
+                .defaultMinSize(minHeight = 84.dp)
+                .padding(horizontal = 8.dp)
                 .onSizeChanged { size -> boxSize = size }
-                .shadow(12.dp, RoundedCornerShape(16.dp))
-                .clip(RoundedCornerShape(16.dp))
-                .background(theme.backgroundColor.copy(alpha = settings.opacity))
-                .border(2.dp, theme.borderColor, RoundedCornerShape(16.dp))
-                .animateContentSize()
+                .shadow(elevation = 16.dp, shape = RoundedCornerShape(20.dp), spotColor = Color.Black.copy(alpha = 0.6f))
+                .clip(RoundedCornerShape(20.dp))
+                .background(
+                    color = theme.backgroundColor.copy(alpha = settings.opacity.coerceIn(0.2f, 1f))
+                )
+                .border(
+                    width = 1.2.dp,
+                    color = theme.borderColor.copy(alpha = 0.45f),
+                    shape = RoundedCornerShape(20.dp)
+                )
                 .testTag("draggable_floating_subtitle_window")
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
-                // Drag Handle & Control Header
+                // Ultra-Compact Minimal Header Bar (Pill Handle + Lock + Settings + Close)
+                val isLocked = settings.isLocked
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(theme.headerColor)
-                        .pointerInput(containerWidthPx, currentBoxW, maxBoundX, maxBoundY, onDragDelta, onDragEnd) {
-                            if (onDragDelta != null) {
-                                detectDragGestures(
-                                    onDragEnd = { onDragEnd?.invoke() },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        onDragDelta(dragAmount.x, dragAmount.y)
-                                    }
-                                )
-                            } else {
+                        .background(theme.headerColor.copy(alpha = 0.65f))
+                        .pointerInput(isLocked, onDragDelta != null) {
+                            if (!isLocked) {
                                 detectDragGestures(
                                     onDragEnd = {
-                                        // Requirement 1: Screen-Edge Snapping Mechanism
-                                        // Snap to either left or right edge when released
-                                        val currentCenter = offsetX.value + (currentBoxW / 2f)
-                                        val screenCenter = containerWidthPx / 2f
-                                        val targetSnapX = if (currentCenter < screenCenter) {
-                                            minBoundX // Dock to left edge
+                                        if (currentOnDragDelta != null) {
+                                            currentOnDragEnd?.invoke()
                                         } else {
-                                            maxBoundX // Dock to right edge
-                                        }
+                                            val currentCenter = offsetX.value + (currentBoxW / 2f)
+                                            val screenCenter = containerWidthPx / 2f
+                                            val targetSnapX = if (currentCenter < screenCenter) {
+                                                minBoundX
+                                            } else {
+                                                maxBoundX
+                                            }
 
-                                        coroutineScope.launch {
-                                            offsetX.animateTo(
-                                                targetValue = targetSnapX,
-                                                animationSpec = spring(
-                                                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                                                    stiffness = Spring.StiffnessLow
+                                            coroutineScope.launch {
+                                                offsetX.animateTo(
+                                                    targetValue = targetSnapX,
+                                                    animationSpec = spring(
+                                                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                                                        stiffness = Spring.StiffnessLow
+                                                    )
                                                 )
-                                            )
+                                            }
                                         }
                                     },
                                     onDrag = { change, dragAmount ->
                                         change.consume()
-                                        coroutineScope.launch {
-                                            // Requirement 1: Clamp within safety boundaries
-                                            val newX = (offsetX.value + dragAmount.x).coerceIn(minBoundX, maxBoundX)
-                                            val newY = (offsetY.value + dragAmount.y).coerceIn(minBoundY, maxBoundY)
-                                            offsetX.snapTo(newX)
-                                            offsetY.snapTo(newY)
+                                        if (currentOnDragDelta != null) {
+                                            currentOnDragDelta?.invoke(dragAmount.x, dragAmount.y)
+                                        } else {
+                                            coroutineScope.launch {
+                                                val newX = (offsetX.value + dragAmount.x).coerceIn(minBoundX, maxBoundX)
+                                                val newY = (offsetY.value + dragAmount.y).coerceIn(minBoundY, maxBoundY)
+                                                offsetX.snapTo(newX)
+                                                offsetY.snapTo(newY)
+                                            }
                                         }
                                     }
                                 )
                             }
                         }
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
+                    // Minimal Drag Handle Pill
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.DragHandle,
-                            contentDescription = "Drag to move subtitle box",
-                            tint = theme.textColor.copy(alpha = 0.85f),
-                            modifier = Modifier.size(20.dp)
+                        Box(
+                            modifier = Modifier
+                                .width(32.dp)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(theme.textColor.copy(alpha = 0.4f))
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Live Subtitle Overlay",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = theme.textColor
+                            text = if (isLocked) "Locked" else "LiveSub",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = theme.textColor.copy(alpha = 0.75f),
+                            fontSize = 11.sp
                         )
                     }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Quick Customize Button
+                    // Compact Control Action Row
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        // Quick Lock / Unlock Icon
+                        IconButton(
+                            onClick = {
+                                onSettingsChanged(settings.copy(isLocked = !isLocked))
+                            },
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("lock_subtitle_button")
+                        ) {
+                            Icon(
+                                imageVector = if (isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                                contentDescription = if (isLocked) "Unlock overlay" else "Lock overlay",
+                                tint = if (isLocked) MaterialTheme.colorScheme.primary else theme.textColor.copy(alpha = 0.75f),
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+
+                        // Style Adjust Panel Toggle
                         IconButton(
                             onClick = { showAdjustPanel = !showAdjustPanel },
                             modifier = Modifier
-                                .size(32.dp)
+                                .size(28.dp)
                                 .testTag("adjust_subtitle_style_button")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Tune,
                                 contentDescription = "Adjust Style",
-                                tint = theme.textColor,
-                                modifier = Modifier.size(16.dp)
+                                tint = theme.textColor.copy(alpha = 0.75f),
+                                modifier = Modifier.size(15.dp)
                             )
                         }
 
-                        // Pause / Resume Button
+                        // Pause / Play
                         IconButton(
                             onClick = {
                                 isPaused = !isPaused
                                 onSettingsChanged(settings.copy(isPaused = isPaused))
                             },
                             modifier = Modifier
-                                .size(32.dp)
+                                .size(28.dp)
                                 .testTag("pause_subtitle_button")
                         ) {
                             Icon(
                                 imageVector = if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
                                 contentDescription = if (isPaused) "Resume" else "Pause",
-                                tint = theme.textColor,
-                                modifier = Modifier.size(18.dp)
+                                tint = theme.textColor.copy(alpha = 0.75f),
+                                modifier = Modifier.size(15.dp)
                             )
                         }
 
-                        // Expand / Collapse Button
-                        IconButton(
-                            onClick = {
-                                isExpanded = !isExpanded
-                                onSettingsChanged(settings.copy(isCollapsed = !isExpanded))
-                            },
-                            modifier = Modifier
-                                .size(32.dp)
-                                .testTag("expand_subtitle_button")
-                        ) {
-                            Icon(
-                                imageVector = if (isExpanded) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                                contentDescription = "Toggle Expand",
-                                tint = theme.textColor,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-
-                        // Close Button (Requirement 3: Clean lifecycle termination)
+                        // Close Icon
                         IconButton(
                             onClick = onClose,
                             modifier = Modifier
-                                .size(32.dp)
+                                .size(28.dp)
                                 .testTag("close_subtitle_button")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Close,
                                 contentDescription = "Close",
-                                tint = theme.textColor,
-                                modifier = Modifier.size(18.dp)
+                                tint = theme.textColor.copy(alpha = 0.75f),
+                                modifier = Modifier.size(15.dp)
                             )
                         }
                     }
                 }
 
-                // Requirement 4: High-visibility DRM & Silence Fallback Banner
+                // High-visibility DRM & Silence Fallback Banner
                 AnimatedVisibility(visible = isDrmSilenceDetected) {
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
                             .testTag("drm_silence_fallback_banner"),
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.errorContainer
@@ -368,7 +401,7 @@ fun DraggableSubtitleBox(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(10.dp),
+                                .padding(8.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Row(
@@ -379,17 +412,18 @@ fun DraggableSubtitleBox(
                                     imageVector = Icons.Default.WarningAmber,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "Audio playback protected (DRM). Switch to Mic mode?",
+                                    text = "Audio DRM protected. Switch to Mic?",
                                     style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    fontSize = 11.sp
                                 )
                             }
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
                             Button(
                                 onClick = onSwitchToMic,
                                 colors = ButtonDefaults.buttonColors(
@@ -397,38 +431,31 @@ fun DraggableSubtitleBox(
                                 ),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier
-                                    .height(34.dp)
+                                    .height(30.dp)
                                     .testTag("switch_to_mic_banner_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Mic,
                                     contentDescription = null,
-                                    modifier = Modifier.size(14.dp)
+                                    modifier = Modifier.size(12.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Switch to Mic mode", style = MaterialTheme.typography.labelSmall)
+                                Text("Switch to Mic", style = MaterialTheme.typography.labelSmall)
                             }
                         }
                     }
                 }
 
-                // Subtitle Content
+                // Clean 2-Line Rolling Subtitle Content Area
                 AnimatedVisibility(visible = isExpanded) {
-                    val stableMinHeight = when (maxLinesCount) {
-                        1 -> if (settings.showOriginal) 68.dp else 46.dp
-                        2 -> if (settings.showOriginal) 100.dp else 68.dp
-                        else -> if (settings.showOriginal) 136.dp else 92.dp
-                    }
-
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .defaultMinSize(minHeight = stableMinHeight)
-                            .padding(14.dp)
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
                     ) {
                         val textShadow = if (settings.isTextOutlineShadowEnabled) {
                             Shadow(
-                                color = Color.Black.copy(alpha = 0.92f),
+                                color = Color.Black.copy(alpha = 0.95f),
                                 offset = Offset(2f, 2f),
                                 blurRadius = settings.textShadowRadius
                             )
@@ -436,56 +463,59 @@ fun DraggableSubtitleBox(
                             Shadow.None
                         }
 
-                        // Original foreign language text
                         val isProcessingAudio = partialText.isNotBlank()
+
+                        // Optional Original foreign language text (1 compact line if enabled)
                         if (settings.showOriginal) {
-                            val visibleOriginals = rollingOriginals.takeLast(maxLinesCount)
-                            val origBase = if (visibleOriginals.isNotEmpty()) {
-                                visibleOriginals.joinToString("\n")
-                            } else if (isLingeredOut && settings.lingerTimeSeconds > 0f && !isProcessingAudio) {
-                                ""
-                            } else {
-                                originalText
-                            }
+                            val lastOrig = rollingOriginals.lastOrNull()
+                                ?: if (!originalText.startsWith("Waiting")) originalText else ""
                             val displayOrig = if (isProcessingAudio) {
-                                if (origBase.isNotBlank()) "$origBase $partialText …" else "$partialText …"
+                                if (lastOrig.isNotBlank()) "$lastOrig $partialText …" else "$partialText …"
                             } else {
-                                origBase
+                                lastOrig
+                            }
+                            val origColor = if (isLingeredOut && !isProcessingAudio) {
+                                theme.originalTextColor.copy(alpha = 0.65f)
+                            } else {
+                                theme.originalTextColor
                             }
                             if (displayOrig.isNotBlank()) {
                                 Text(
                                     text = displayOrig,
-                                    fontSize = (settings.fontSizeSp - 3f).coerceAtLeast(12f).sp,
-                                    color = theme.originalTextColor,
+                                    fontSize = (settings.fontSizeSp - 3.5f).coerceAtLeast(11f).sp,
+                                    color = origColor,
                                     fontStyle = FontStyle.Italic,
                                     style = TextStyle(shadow = textShadow),
-                                    lineHeight = (settings.fontSizeSp + 2f).sp,
-                                    maxLines = maxLinesCount,
+                                    lineHeight = (settings.fontSizeSp * 1.15f).sp,
+                                    maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(bottom = 6.dp)
+                                    modifier = Modifier.padding(bottom = 3.dp)
                                 )
                             }
                         }
 
-                        // Translated Subtitle Output (Primary) - Strict UI Slot Separation:
-                        // NEVER render raw partialTextFlow or source speech inside this container.
+                        // Primary Translated Subtitle: Strictly max 2 lines with smooth roll-off
+                        // Takes the freshest 2 lines from the rolling sentence buffer without repeating
                         val visibleSentences = rollingSentences.takeLast(maxLinesCount)
                         val displayTranslated = if (isPaused) {
                             "[Translation Paused]"
                         } else if (visibleSentences.isNotEmpty()) {
-                            val joined = visibleSentences.joinToString("\n")
-                            if (isProcessingAudio) "$joined …" else joined
-                        } else if (isLingeredOut && settings.lingerTimeSeconds > 0f && !isProcessingAudio) {
-                            ""
+                            visibleSentences.joinToString("\n")
                         } else {
-                            val fallback = if (translatedText.isNotBlank()) translatedText else "…"
-                            if (isProcessingAudio) "$fallback …" else fallback
+                            val cleanTranslated = translatedText.trim()
+                            if (cleanTranslated.isNotBlank()) {
+                                cleanTranslated
+                            } else {
+                                "Subtitles will stream here..."
+                            }
                         }
 
-                        val textColor = if (isProcessingAudio && !isPaused) {
-                            theme.textColor.copy(alpha = 0.78f) // Subtle dimming while speech is being processed
-                        } else {
-                            theme.textColor
+                        // Stable text opacity: gentle fade during linger instead of popping to blank
+                        val textColor = when {
+                            isPaused -> theme.textColor.copy(alpha = 0.65f)
+                            isLingeredOut && !isProcessingAudio -> theme.textColor.copy(alpha = 0.70f)
+                            isProcessingAudio -> theme.textColor.copy(alpha = 0.90f)
+                            else -> theme.textColor
                         }
 
                         if (displayTranslated.isNotBlank()) {
@@ -521,10 +551,10 @@ fun DraggableSubtitleBox(
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // Requirement 3: Configurable Display Lines Control (1, 2, or 3 lines max)
+                        // Configurable Display Lines Control (1 or 2 lines clean limit)
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Text(
-                                text = "Display Lines: ${settings.maxLines} Line${if (settings.maxLines > 1) "s" else ""}",
+                                text = "Display Lines: ${settings.maxLines.coerceIn(1, 2)} Line${if (settings.maxLines.coerceIn(1, 2) > 1) "s" else ""}",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurface
@@ -534,7 +564,7 @@ fun DraggableSubtitleBox(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                listOf(1, 2, 3).forEach { lines ->
+                                listOf(1, 2).forEach { lines ->
                                     val isSelected = settings.maxLines == lines
                                     Box(
                                         modifier = Modifier
@@ -704,6 +734,34 @@ fun DraggableSubtitleBox(
                             Switch(
                                 checked = settings.showOriginal,
                                 onCheckedChange = { onSettingsChanged(settings.copy(showOriginal = it)) }
+                            )
+                        }
+
+                        // Lock Overlay Positioning Toggle
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Lock Overlay Position",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Prevents accidental dragging during video playback",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 10.sp
+                                )
+                            }
+                            Switch(
+                                checked = settings.isLocked,
+                                onCheckedChange = { onSettingsChanged(settings.copy(isLocked = it)) },
+                                modifier = Modifier.testTag("toggle_lock_overlay_settings")
                             )
                         }
                     }

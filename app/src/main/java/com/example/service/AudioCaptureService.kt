@@ -495,6 +495,7 @@ class AudioCaptureService : Service() {
         captureJob = serviceScope.launch(Dispatchers.Default) {
             val shortBuffer = ShortArray(4096)
             var silenceStartMs = 0L
+            val captureStartTime = System.currentTimeMillis()
 
             try {
                 record.startRecording()
@@ -525,14 +526,18 @@ class AudioCaptureService : Service() {
                         val db = AudioUtils.calculateDbLevel(processedSamples)
                         _liveAudioDb.value = db
 
-                        // Requirement 4: Detect continuous silence (>5s with RMS < 5 dB) during internal capture
+                        // Safeguard against premature DRM silence triggers:
+                        // Require at least 10s since capture start (allowing user to switch apps)
+                        // and 7s of continuous sub-5dB silence before alerting
                         if (isStereo) {
+                            val now = System.currentTimeMillis()
+                            val timeSinceCaptureStart = now - captureStartTime
                             if (db < 5.0f) {
                                 if (silenceStartMs == 0L) {
-                                    silenceStartMs = System.currentTimeMillis()
-                                } else if (System.currentTimeMillis() - silenceStartMs >= 5000L) {
+                                    silenceStartMs = now
+                                } else if (timeSinceCaptureStart >= 10000L && now - silenceStartMs >= 7000L) {
                                     if (!_isDrmSilenceDetected.value) {
-                                        Log.w(TAG, "Continuous silence > 5s detected during internal audio playback (possible DRM)")
+                                        Log.w(TAG, "Continuous silence detected during internal audio playback (possible DRM)")
                                         _isDrmSilenceDetected.value = true
                                     }
                                 }

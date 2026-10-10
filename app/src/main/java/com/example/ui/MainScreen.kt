@@ -3,6 +3,8 @@ package com.example.ui
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -105,7 +107,6 @@ fun MainScreen(
     val context = LocalContext.current
 
     var showHistorySheet by remember { mutableStateOf(false) }
-    var showInAppFloatingBox by remember { mutableStateOf(true) }
 
     LaunchedEffect(errorMessage) {
         errorMessage?.let { msg ->
@@ -287,7 +288,7 @@ fun MainScreen(
                         .fillMaxSize()
                         .padding(horizontal = 14.dp, vertical = 4.dp)
                 ) {
-                    // Audio Mode Selection Chips
+                    // Compact Controls Row: Audio Mode Filter Chips + Floating Overlay Button
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -299,12 +300,12 @@ fun MainScreen(
                             FilterChip(
                                 selected = !isMicMode,
                                 onClick = { viewModel.toggleMicMode(false) },
-                                label = { Text("Internal Audio", style = MaterialTheme.typography.labelSmall) },
+                                label = { Text("Internal", style = MaterialTheme.typography.labelSmall) },
                                 leadingIcon = {
                                     Icon(
                                         imageVector = Icons.Default.VolumeUp,
                                         contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
+                                        modifier = Modifier.size(15.dp)
                                     )
                                 },
                                 enabled = !isCapturing,
@@ -319,7 +320,7 @@ fun MainScreen(
                                     Icon(
                                         imageVector = Icons.Default.Mic,
                                         contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
+                                        modifier = Modifier.size(15.dp)
                                     )
                                 },
                                 enabled = !isCapturing,
@@ -327,22 +328,52 @@ fun MainScreen(
                             )
                         }
 
-                        // Direct shortcut to Manage Models Tab
-                        OutlinedButton(
-                            onClick = { selectedTab = 1 },
-                            shape = RoundedCornerShape(10.dp),
+                        // Dedicated Floating Overlay Toggle Button with Active Indicator Badge
+                        Button(
+                            onClick = {
+                                if (isOverlayActive) {
+                                    viewModel.stopFloatingOverlay()
+                                } else {
+                                    onRequestOverlayPermission()
+                                }
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = if (isOverlayActive) {
+                                ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            } else {
+                                ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                             modifier = Modifier
-                                .height(32.dp)
-                                .testTag("shortcut_manage_models_button"),
-                            contentPadding = ButtonDefaults.TextButtonContentPadding
+                                .height(34.dp)
+                                .testTag("toggle_floating_overlay_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.SettingsSuggest,
+                                imageVector = Icons.Default.Subtitles,
                                 contentDescription = null,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(15.dp)
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Models", style = MaterialTheme.typography.labelSmall)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isOverlayActive) "Overlay Active" else "Launch Overlay",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (isOverlayActive) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .clip(RoundedCornerShape(3.5.dp))
+                                        .background(MaterialTheme.colorScheme.primary)
+                                )
+                            }
                         }
                     }
 
@@ -358,104 +389,6 @@ fun MainScreen(
                         onSwap = { viewModel.swapLanguages() }
                     )
 
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    // Floating Window Overlay Control Card
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("floating_window_control_card"),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
-                        ),
-                        border = CardDefaults.outlinedCardBorder()
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(overlaySettings.theme.backgroundColor),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Subtitles,
-                                        contentDescription = null,
-                                        tint = overlaySettings.theme.textColor,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = "Floating Subtitle Window",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        if (isOverlayActive) {
-                                            Surface(
-                                                shape = RoundedCornerShape(6.dp),
-                                                color = MaterialTheme.colorScheme.primary
-                                            ) {
-                                                Text(
-                                                    text = "ACTIVE",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onPrimary,
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Text(
-                                        text = "Floats over YouTube, games & video apps",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        fontSize = 11.sp
-                                    )
-                                }
-                            }
-
-                            // Action to activate system overlay
-                            OutlinedButton(
-                                onClick = {
-                                    if (isOverlayActive) {
-                                        viewModel.stopFloatingOverlay()
-                                    } else {
-                                        onRequestOverlayPermission()
-                                    }
-                                },
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.testTag("toggle_system_overlay_button")
-                            ) {
-                                Icon(
-                                    imageVector = if (isOverlayActive) Icons.Default.Close else Icons.Default.OpenInNew,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = if (isOverlayActive) "Close" else "Overlay",
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
-                        }
-                    }
-
                     Spacer(modifier = Modifier.height(4.dp))
 
                     // Audio Visualizer VU Meter
@@ -466,42 +399,269 @@ fun MainScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    // Draggable & Adjustable Subtitle Window
-                    Box(
+                    // Live Transcription & Translation History Section
+                    // Replaces in-app floating box with a live-updating, auto-scrolling conversation feed
+                    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+                    // Auto-scroll to newest item as history grows
+                    LaunchedEffect(history.size, originalSpeech, partialSpeech) {
+                        if (history.isNotEmpty()) {
+                            listState.animateScrollToItem(history.size - 1)
+                        }
+                    }
+
+                    Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .weight(1f),
-                        contentAlignment = Alignment.TopCenter
+                            .weight(1f)
+                            .testTag("live_transcript_history_container"),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                        ),
+                        border = CardDefaults.outlinedCardBorder()
                     ) {
-                        if (showInAppFloatingBox) {
-                            DraggableSubtitleBox(
-                                originalText = originalSpeech,
-                                translatedText = translatedSpeech,
-                                partialText = partialSpeech,
-                                settings = overlaySettings,
-                                isDrmSilenceDetected = isDrmSilenceDetected,
-                                onSwitchToMic = { viewModel.switchToMicMode() },
-                                onSettingsChanged = { viewModel.updateFloatingSettings(it) },
-                                onClose = {
-                                    viewModel.stopCapture()
-                                    viewModel.stopFloatingOverlay()
-                                    showInAppFloatingBox = false
-                                }
-                            )
-                        } else {
-                            Box(
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            // Section Header with item count and live indicator
+                            Row(
                                 modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(24.dp),
-                                contentAlignment = Alignment.Center
+                                    .fillMaxWidth()
+                                    .padding(bottom = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                OutlinedButton(
-                                    onClick = { showInAppFloatingBox = true },
-                                    modifier = Modifier.testTag("restore_subtitle_box_button")
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.History,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Live Transcription & Translation",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                if (isCapturing) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.primaryContainer
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(6.dp)
+                                                    .clip(RoundedCornerShape(3.dp))
+                                                    .background(MaterialTheme.colorScheme.primary)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = "LISTENING",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (history.isEmpty() && (originalSpeech.startsWith("Waiting") || originalSpeech.isBlank())) {
+                                // Empty state
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(16.dp),
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(imageVector = Icons.Default.FitScreen, contentDescription = null)
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Show Draggable Subtitle Window")
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Icon(
+                                            imageVector = Icons.Default.Translate,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                            modifier = Modifier.size(36.dp)
+                                        )
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = "Ready to transcribe & translate audio",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = "Press 'Start' below to stream live subtitles",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                        )
+                                    }
+                                }
+                            } else {
+                                androidx.compose.foundation.lazy.LazyColumn(
+                                    state = listState,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .testTag("live_history_feed"),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    items(
+                                        items = history,
+                                        key = { it.id }
+                                    ) { item ->
+                                        val timeStr = remember(item.timestamp) {
+                                            java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                                                .format(java.util.Date(item.timestamp))
+                                        }
+
+                                        Card(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .clickable {
+                                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                                    val clip = android.content.ClipData.newPlainText(
+                                                        "Translation",
+                                                        "${item.originalText}\n${item.translatedText}"
+                                                    )
+                                                    clipboard?.setPrimaryClip(clip)
+                                                    android.widget.Toast.makeText(context, "Copied to clipboard", android.widget.Toast.LENGTH_SHORT).show()
+                                                }
+                                                .testTag("transcript_history_item_${item.id}"),
+                                            colors = CardDefaults.cardColors(
+                                                containerColor = MaterialTheme.colorScheme.surface
+                                            ),
+                                            shape = RoundedCornerShape(12.dp),
+                                            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                                        ) {
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(10.dp)
+                                            ) {
+                                                // Header: Language badge & Timestamp
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Surface(
+                                                        shape = RoundedCornerShape(6.dp),
+                                                        color = MaterialTheme.colorScheme.secondaryContainer
+                                                    ) {
+                                                        Text(
+                                                            text = "${item.sourceLanguage.uppercase()} → ${item.targetLanguage.uppercase()}",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+
+                                                    Text(
+                                                        text = timeStr,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        fontSize = 10.sp
+                                                    )
+                                                }
+
+                                                Spacer(modifier = Modifier.height(4.dp))
+
+                                                // 1. Original Transcription
+                                                Text(
+                                                    text = item.originalText,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                                                )
+
+                                                Spacer(modifier = Modifier.height(2.dp))
+
+                                                // 2. Translated Text
+                                                Text(
+                                                    text = item.translatedText,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // Currently streaming live speech card (partial & latest)
+                                    if (isCapturing && (partialSpeech.isNotBlank() || (originalSpeech.isNotBlank() && !originalSpeech.startsWith("Waiting")))) {
+                                        item {
+                                            Card(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .testTag("live_streaming_transcript_card"),
+                                                colors = CardDefaults.cardColors(
+                                                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                                                ),
+                                                shape = RoundedCornerShape(12.dp)
+                                            ) {
+                                                Column(modifier = Modifier.padding(10.dp)) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        modifier = Modifier.padding(bottom = 2.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "Live Stream",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.primary
+                                                        )
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Text(
+                                                            text = "Transcribing…",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                            fontSize = 10.sp
+                                                        )
+                                                    }
+
+                                                    val liveOriginal = if (partialSpeech.isNotBlank()) {
+                                                        if (originalSpeech.isNotBlank() && !originalSpeech.startsWith("Waiting")) {
+                                                            "$originalSpeech $partialSpeech"
+                                                        } else {
+                                                            partialSpeech
+                                                        }
+                                                    } else {
+                                                        originalSpeech
+                                                    }
+
+                                                    if (liveOriginal.isNotBlank() && !liveOriginal.startsWith("Waiting")) {
+                                                        Text(
+                                                            text = liveOriginal,
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                                                        )
+                                                    }
+
+                                                    if (translatedSpeech.isNotBlank() && !translatedSpeech.startsWith("Translation will appear")) {
+                                                        Spacer(modifier = Modifier.height(2.dp))
+                                                        Text(
+                                                            text = translatedSpeech,
+                                                            style = MaterialTheme.typography.bodyMedium,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.primary
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

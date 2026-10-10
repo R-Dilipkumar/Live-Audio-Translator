@@ -51,6 +51,7 @@ data class OverlaySettings(
     val showOriginal: Boolean = true,
     val isCollapsed: Boolean = false,
     val isPaused: Boolean = false,
+    val isLocked: Boolean = false,
     val maxLines: Int = 2,
     val lingerTimeSeconds: Float = 3.5f, // 1.0s to 10.0s, or 0f for 'Keep until next speech'
     val isTextOutlineShadowEnabled: Boolean = true,

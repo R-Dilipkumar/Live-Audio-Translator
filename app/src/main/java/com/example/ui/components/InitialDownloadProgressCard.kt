@@ -97,8 +97,17 @@ fun InitialDownloadProgressCard(
                         }
 
                         val downloadingState = asrState as? ModelDownloadState.Downloading
+                        val extractingState = asrState as? ModelDownloadState.Extracting
                         if (downloadingState != null) {
                             val percent = (downloadingState.progress * 100).toInt().coerceIn(0, 100)
+                            Text(
+                                text = "$percent%",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else if (extractingState != null) {
+                            val percent = (extractingState.progress * 100).toInt().coerceIn(0, 100)
                             Text(
                                 text = "$percent%",
                                 style = MaterialTheme.typography.titleMedium,
@@ -142,13 +151,33 @@ fun InitialDownloadProgressCard(
                             )
                         }
                     } else if (isAsrExtracting) {
+                        val extractingState = asrState as? ModelDownloadState.Extracting
+                        val progressFloat = (extractingState?.progress ?: 0.1f).coerceIn(0.05f, 1f)
                         LinearProgressIndicator(
+                            progress = { progressFloat },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(8.dp)
                                 .clip(RoundedCornerShape(4.dp)),
                             color = MaterialTheme.colorScheme.primary
                         )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Extracting: ${extractingState?.currentFile?.ifEmpty { "Model Files..." } ?: "Model Files..."}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                            )
+                            Text(
+                                text = "Decompressing on IO thread",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                                fontSize = 10.sp
+                            )
+                        }
                     }
                 }
             }

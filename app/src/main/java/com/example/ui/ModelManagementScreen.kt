@@ -564,6 +564,42 @@ private fun AsrModelItemCard(
                     }
                 }
             }
+
+            // Progress bar if currently extracting archive
+            val extractingState = downloadState as? ModelDownloadState.Extracting
+            AnimatedVisibility(visible = isExtracting && extractingState != null) {
+                if (extractingState != null) {
+                    Column(modifier = Modifier.padding(top = 8.dp)) {
+                        val percent = (extractingState.progress * 100).toInt()
+                        LinearProgressIndicator(
+                            progress = { extractingState.progress.coerceIn(0.05f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Extracting: ${extractingState.currentFile.ifEmpty { "Model Archive..." }}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "$percent%",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.tertiary
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

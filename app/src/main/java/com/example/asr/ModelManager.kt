@@ -18,6 +18,7 @@ import okhttp3.Request
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -66,7 +67,7 @@ data class AsrModelConfig(
 sealed class ModelDownloadState {
     object NotDownloaded : ModelDownloadState()
     data class Downloading(val bytesDownloaded: Long, val totalBytes: Long, val progress: Float) : ModelDownloadState()
-    data class Extracting(val currentFile: String = "") : ModelDownloadState()
+    data class Extracting(val currentFile: String = "", val progress: Float = 0f) : ModelDownloadState()
     data class Ready(val modelDir: File) : ModelDownloadState()
     data class Error(val errorMsg: String) : ModelDownloadState()
 }
@@ -241,13 +242,8 @@ class ModelManager(private val context: Context) {
     fun getAvailableStorageMb(): Long {
         val cached = _availableStorageMb.value
         if (cached > 0L) return cached
-        return try {
-            val statFs = StatFs(context.filesDir.path)
-            val availableBytes = statFs.availableBlocksLong * statFs.blockSizeLong
-            (availableBytes / (1024L * 1024L)).also { _availableStorageMb.value = it }
-        } catch (_: Exception) {
-            500L
-        }
+        scope.launch { refreshAvailableStorage() }
+        return 500L
     }
 
     /**
@@ -297,16 +293,7 @@ class ModelManager(private val context: Context) {
      * Uses in-memory StateFlow cache to avoid blocking the main UI thread during Compose recomposition.
      */
     fun isModelReady(model: AsrModelConfig): Boolean {
-        val ready = _readyModelIds.value
-        if (ready.contains(model.id)) return true
-        if (!hasInitialScanCompleted) {
-            val onDisk = checkModelFilesOnDisk(model)
-            if (onDisk) {
-                _readyModelIds.value = ready + model.id
-            }
-            return onDisk
-        }
-        return false
+        return _readyModelIds.value.contains(model.id)
     }
 
     /**
@@ -399,19 +386,23 @@ class ModelManager(private val context: Context) {
             }
 
             // Extract the downloaded model
-            _downloadState.value = ModelDownloadState.Extracting("Preparing model directory...")
+            _downloadState.value = ModelDownloadState.Extracting("Preparing model directory...", 0.05f)
             if (targetDir.exists()) {
                 targetDir.deleteRecursively()
             }
             targetDir.mkdirs()
 
+            val progressCallback: (String, Float) -> Unit = { entryName, prog ->
+                _downloadState.value = ModelDownloadState.Extracting(entryName, prog)
+            }
+
             // Try unpacking based on archive format (tar.bz2, zip, or direct file)
             val isZip = isZipFile(tempArchiveFile)
             val isBz2 = isBzip2File(tempArchiveFile) || model.downloadUrl.endsWith(".tar.bz2") || model.downloadUrl.endsWith(".bz2")
             if (isZip) {
-                unzip(tempArchiveFile, targetDir)
+                unzip(tempArchiveFile, targetDir, progressCallback)
             } else if (isBz2) {
-                extractTarBz2(tempArchiveFile, targetDir)
+                extractTarBz2(tempArchiveFile, targetDir, progressCallback)
             } else {
                 // For direct file or custom archive, move to target
                 val extractedFile = File(targetDir, model.encoderFilename)
@@ -486,13 +477,21 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    private fun extractTarBz2(archiveFile: File, targetDirectory: File) {
+    private fun extractTarBz2(
+        archiveFile: File,
+        targetDirectory: File,
+        onProgress: ((entryName: String, progress: Float) -> Unit)? = null
+    ) {
         val targetCanonicalDirPath = targetDirectory.canonicalPath + File.separator
+        val bufferSize = 64 * 1024
+        var extractedCount = 0
+
         FileInputStream(archiveFile).use { fis ->
-            BufferedInputStream(fis).use { bis ->
+            BufferedInputStream(fis, bufferSize).use { bis ->
                 BZip2CompressorInputStream(bis).use { bzIn ->
                     TarArchiveInputStream(bzIn).use { tarIn ->
                         var entry = tarIn.nextEntry
+                        val buffer = ByteArray(bufferSize)
                         while (entry != null) {
                             val newFile = File(targetDirectory, entry.name)
                             val canonicalPath = newFile.canonicalPath
@@ -504,8 +503,16 @@ class ModelManager(private val context: Context) {
                                 newFile.mkdirs()
                             } else {
                                 newFile.parentFile?.mkdirs()
-                                FileOutputStream(newFile).use { fos ->
-                                    tarIn.copyTo(fos)
+                                val simpleName = entry.name.substringAfterLast('/')
+                                extractedCount++
+                                onProgress?.invoke(simpleName, (extractedCount / 10f).coerceIn(0.1f, 0.95f))
+
+                                BufferedOutputStream(FileOutputStream(newFile), bufferSize).use { bos ->
+                                    var count: Int
+                                    while (tarIn.read(buffer).also { count = it } != -1) {
+                                        bos.write(buffer, 0, count)
+                                    }
+                                    bos.flush()
                                 }
                             }
                             entry = tarIn.nextEntry
@@ -516,27 +523,47 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    private fun unzip(zipFile: File, targetDirectory: File) {
+    private fun unzip(
+        zipFile: File,
+        targetDirectory: File,
+        onProgress: ((entryName: String, progress: Float) -> Unit)? = null
+    ) {
         val targetCanonicalDirPath = targetDirectory.canonicalPath + File.separator
-        ZipInputStream(BufferedInputStream(FileInputStream(zipFile))).use { zis ->
-            var entry = zis.nextEntry
-            while (entry != null) {
-                val newFile = File(targetDirectory, entry.name)
-                val canonicalPath = newFile.canonicalPath
-                // Protect against Zip Slip vulnerability
-                if (!canonicalPath.startsWith(targetCanonicalDirPath) && canonicalPath != targetDirectory.canonicalPath) {
-                    throw SecurityException("Zip entry is outside of target dir: ${entry.name}")
-                }
-                if (entry.isDirectory) {
-                    newFile.mkdirs()
-                } else {
-                    newFile.parentFile?.mkdirs()
-                    FileOutputStream(newFile).use { fos ->
-                        zis.copyTo(fos)
+        val bufferSize = 64 * 1024
+        var extractedCount = 0
+        val buffer = ByteArray(bufferSize)
+
+        FileInputStream(zipFile).use { fis ->
+            BufferedInputStream(fis, bufferSize).use { bis ->
+                ZipInputStream(bis).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        val newFile = File(targetDirectory, entry.name)
+                        val canonicalPath = newFile.canonicalPath
+                        // Protect against Zip Slip vulnerability
+                        if (!canonicalPath.startsWith(targetCanonicalDirPath) && canonicalPath != targetDirectory.canonicalPath) {
+                            throw SecurityException("Zip entry is outside of target dir: ${entry.name}")
+                        }
+                        if (entry.isDirectory) {
+                            newFile.mkdirs()
+                        } else {
+                            newFile.parentFile?.mkdirs()
+                            val simpleName = entry.name.substringAfterLast('/')
+                            extractedCount++
+                            onProgress?.invoke(simpleName, (extractedCount / 8f).coerceIn(0.1f, 0.95f))
+
+                            BufferedOutputStream(FileOutputStream(newFile), bufferSize).use { bos ->
+                                var count: Int
+                                while (zis.read(buffer).also { count = it } != -1) {
+                                    bos.write(buffer, 0, count)
+                                }
+                                bos.flush()
+                            }
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
                     }
                 }
-                zis.closeEntry()
-                entry = zis.nextEntry
             }
         }
     }

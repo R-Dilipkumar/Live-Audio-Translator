@@ -200,7 +200,8 @@ class FloatingSubtitleService : Service() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             layoutFlag,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -267,37 +268,43 @@ class FloatingSubtitleService : Service() {
                 onDragDelta = { dx, dy ->
                     val p = layoutParams ?: return@DraggableSubtitleBox
                     val w = windowManager ?: return@DraggableSubtitleBox
+                    val root = overlayRootView ?: return@DraggableSubtitleBox
                     val metrics = resources.displayMetrics
                     val screenW = metrics.widthPixels
                     val screenH = metrics.heightPixels
 
-                    val viewW = overlayRootView?.width ?: dpToPx(340)
-                    val viewH = overlayRootView?.height ?: dpToPx(140)
+                    val viewW = root.width.takeIf { it > 0 } ?: dpToPx(340)
+                    val viewH = root.height.takeIf { it > 0 } ?: dpToPx(140)
 
-                    val minX = dpToPx(6)
-                    val maxX = (screenW - viewW - dpToPx(6)).coerceAtLeast(minX)
-                    val minY = dpToPx(32)
-                    val maxY = (screenH - viewH - dpToPx(56)).coerceAtLeast(minY)
+                    val minX = dpToPx(4)
+                    val maxX = (screenW - viewW - dpToPx(4)).coerceAtLeast(minX)
+                    val minY = dpToPx(28)
+                    val maxY = (screenH - viewH - dpToPx(48)).coerceAtLeast(minY)
 
                     p.x = (p.x + dx.toInt()).coerceIn(minX, maxX)
                     p.y = (p.y + dy.toInt()).coerceIn(minY, maxY)
                     try {
-                        w.updateViewLayout(overlayRootView, p)
+                        w.updateViewLayout(root, p)
                     } catch (_: Exception) {}
                 },
                 onDragEnd = {
                     val p = layoutParams ?: return@DraggableSubtitleBox
                     val w = windowManager ?: return@DraggableSubtitleBox
+                    val root = overlayRootView ?: return@DraggableSubtitleBox
                     val metrics = resources.displayMetrics
                     val screenW = metrics.widthPixels
-                    val viewW = overlayRootView?.width ?: dpToPx(340)
-                    val minX = dpToPx(6)
-                    val maxX = (screenW - viewW - dpToPx(6)).coerceAtLeast(minX)
+                    val viewW = root.width.takeIf { it > 0 } ?: dpToPx(340)
+                    val minX = dpToPx(4)
+                    val maxX = (screenW - viewW - dpToPx(4)).coerceAtLeast(minX)
 
-                    val centerBoxX = p.x + (viewW / 2)
-                    p.x = if (centerBoxX < screenW / 2) minX else maxX
+                    val snapMargin = dpToPx(24)
+                    if (p.x < minX + snapMargin) {
+                        p.x = minX
+                    } else if (p.x > maxX - snapMargin) {
+                        p.x = maxX
+                    }
                     try {
-                        w.updateViewLayout(overlayRootView, p)
+                        w.updateViewLayout(root, p)
                     } catch (_: Exception) {}
                 }
             )
@@ -344,9 +351,19 @@ class FloatingSubtitleService : Service() {
             } catch (_: Exception) {}
         }
 
+        // Immediately hydrate initial values from translator engine if available
+        translator.latestTranslation.value?.let { initial ->
+            if (initial.originalText.isNotBlank()) {
+                _floatingOriginalText.value = initial.originalText
+            }
+            if (initial.translatedText.isNotBlank()) {
+                _floatingTranslatedText.value = initial.translatedText
+            }
+        }
+
         var lastTranslationUpdateTime = 0L
         var lastPartialUpdateTime = 0L
-        val minUpdateIntervalMs = 80L
+        val minUpdateIntervalMs = 60L
 
         translationCollectJob?.cancel()
         translationCollectJob = serviceScope.launch {
@@ -361,11 +378,6 @@ class FloatingSubtitleService : Service() {
 
                     _floatingOriginalText.value = result.originalText
                     _floatingTranslatedText.value = result.translatedText
-
-                    // Force redraw and measure in WindowManager hierarchy
-                    overlayRootView?.post {
-                        overlayRootView?.requestLayout()
-                    }
                 }
             }
         }
@@ -382,9 +394,6 @@ class FloatingSubtitleService : Service() {
                     lastPartialUpdateTime = System.currentTimeMillis()
 
                     _floatingPartialText.value = partial
-                    overlayRootView?.post {
-                        overlayRootView?.requestLayout()
-                    }
                 }
             }
         }

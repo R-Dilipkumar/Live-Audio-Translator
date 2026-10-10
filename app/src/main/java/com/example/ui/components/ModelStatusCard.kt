@@ -98,7 +98,7 @@ fun ModelStatusCard(
                         val statusText = when (asrState) {
                             is ModelDownloadState.Ready -> "Model Ready (Offline)"
                             is ModelDownloadState.Downloading -> "Downloading ${(asrState.progress * 100).toInt()}%"
-                            is ModelDownloadState.Extracting -> asrState.currentFile
+                            is ModelDownloadState.Extracting -> if (asrState.currentFile.isNotEmpty()) "Extracting: ${asrState.currentFile} (${(asrState.progress * 100).toInt()}%)" else "Extracting archive..."
                             is ModelDownloadState.Error -> "Error: ${asrState.errorMsg}"
                             ModelDownloadState.NotDownloaded -> "Not Downloaded (~${asrModel.totalSizeBytes / (1024 * 1024)} MB)"
                         }
@@ -108,6 +108,7 @@ fun ModelStatusCard(
                             color = when (asrState) {
                                 is ModelDownloadState.Ready -> MaterialTheme.colorScheme.primary
                                 is ModelDownloadState.Error -> MaterialTheme.colorScheme.error
+                                is ModelDownloadState.Extracting -> MaterialTheme.colorScheme.tertiary
                                 else -> MaterialTheme.colorScheme.onSurfaceVariant
                             }
                         )
@@ -150,8 +151,10 @@ fun ModelStatusCard(
 
                     is ModelDownloadState.Extracting -> {
                         CircularProgressIndicator(
+                            progress = { asrState.progress.coerceIn(0.05f, 1f) },
                             modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.5.dp
+                            strokeWidth = 2.5.dp,
+                            color = MaterialTheme.colorScheme.tertiary
                         )
                     }
 

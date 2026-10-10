@@ -28,5 +28,16 @@ class ExampleRobolectricTest {
         val notification = NotificationHelper.buildCaptureNotification(context)
         assertNotNull(notification)
     }
+
+    @Test
+    fun `verify offline dictionary translation fallback operates without google services`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val engine = com.example.translate.LocalTranslatorEngine(context)
+        val translated = engine.fallbackOfflineTranslate("こんにちは", "ja", "en")
+        assertEquals("Hello", translated)
+
+        val spanishTranslated = engine.fallbackOfflineTranslate("gracias", "es", "en")
+        assertEquals("Thank you", spanishTranslated)
+    }
 }
 

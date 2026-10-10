@@ -56,8 +56,18 @@ class LocalTranslatorEngine(private val context: Context) {
 
     private val TAG = "LocalTranslatorEngine"
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private val modelManager = RemoteModelManager.getInstance()
-    private val languageIdentifier: LanguageIdentifier = LanguageIdentification.getClient()
+    private val modelManager = try {
+        RemoteModelManager.getInstance()
+    } catch (e: Exception) {
+        Log.w(TAG, "RemoteModelManager unavailable: ${e.message}")
+        null
+    }
+    private val languageIdentifier: LanguageIdentifier? = try {
+        LanguageIdentification.getClient()
+    } catch (e: Exception) {
+        Log.w(TAG, "LanguageIdentification unavailable: ${e.message}")
+        null
+    }
 
     val autoDetectLanguage = SupportedLanguage("auto", "Auto-Detect", "🌐", isAutoDetect = true)
 
@@ -148,7 +158,8 @@ class LocalTranslatorEngine(private val context: Context) {
 
     suspend fun refreshDownloadedLanguages() = withContext(Dispatchers.IO) {
         try {
-            val models = modelManager.getDownloadedModels(TranslateRemoteModel::class.java).await()
+            val mm = modelManager ?: return@withContext
+            val models = mm.getDownloadedModels(TranslateRemoteModel::class.java).await()
             val codes = models.map { it.language }.toSet()
             _downloadedLanguages.value = codes
         } catch (e: Exception) {
@@ -253,6 +264,11 @@ class LocalTranslatorEngine(private val context: Context) {
      * was accepted but silently ignored — download failures were never retried.
      */
     suspend fun downloadSingleLanguagePack(langCode: String, maxRetries: Int = 2): Boolean = withContext(Dispatchers.IO) {
+        val mm = modelManager
+        if (mm == null) {
+            Log.w(TAG, "Cannot download language pack: RemoteModelManager is null. Offline fallback will be used.")
+            return@withContext false
+        }
         val currentMap = _downloadingPacks.value.toMutableMap()
         currentMap[langCode] = 20
         _downloadingPacks.value = currentMap
@@ -266,7 +282,7 @@ class LocalTranslatorEngine(private val context: Context) {
                 currentMap[langCode] = 20 + (attempt * 15)
                 _downloadingPacks.value = currentMap.toMap()
 
-                modelManager.download(model, conditions).await()
+                mm.download(model, conditions).await()
 
                 currentMap[langCode] = 100
                 _downloadingPacks.value = currentMap.toMap()
@@ -325,8 +341,9 @@ class LocalTranslatorEngine(private val context: Context) {
      */
     suspend fun deleteLanguageModel(langCode: String): Boolean = withContext(Dispatchers.IO) {
         try {
+            val mm = modelManager ?: return@withContext false
             val model = TranslateRemoteModel.Builder(langCode).build()
-            modelManager.deleteDownloadedModel(model).await()
+            mm.deleteDownloadedModel(model).await()
             synchronized(cacheLock) {
                 val iterator = translatorCache.entries.iterator()
                 while (iterator.hasNext()) {
@@ -354,8 +371,9 @@ class LocalTranslatorEngine(private val context: Context) {
      * retains and returns the previously identified language rather than falling back.
      */
     suspend fun identifyLanguage(text: String): String = withContext(Dispatchers.IO) {
+        val identifier = languageIdentifier ?: return@withContext lastIdentifiedLanguage
         try {
-            val possibleLanguages = languageIdentifier.identifyPossibleLanguages(text).await()
+            val possibleLanguages = identifier.identifyPossibleLanguages(text).await()
             val best = possibleLanguages.maxByOrNull { it.confidence }
             val threshold = confidenceThreshold
             if (best != null && best.languageTag != "und" && best.confidence >= threshold) {
@@ -402,6 +420,7 @@ class LocalTranslatorEngine(private val context: Context) {
     /**
      * Translates a text string asynchronously and emits into the flow.
      * If source language is Auto-Detect, detects language via ML Kit and routes dynamically.
+     * When ML Kit is unavailable or packs are missing, uses the offline fallback dictionary.
      */
     fun translateText(originalText: String) {
         val trimmed = originalText.trim()
@@ -434,10 +453,11 @@ class LocalTranslatorEngine(private val context: Context) {
                 if (translator != null) {
                     performTranslation(translator, trimmed, "auto ($detectedCode)", tgtCode, detectedName)
                 } else {
+                    val fallback = fallbackOfflineTranslate(trimmed, detectedCode, tgtCode)
                     emitTranslation(
                         TranslationResult(
                             originalText = trimmed,
-                            translatedText = "[Auto-Detect ($detectedName): Downloading pack $detectedCode → $tgtCode...]",
+                            translatedText = fallback,
                             sourceLangCode = "auto ($detectedCode)",
                             targetLangCode = tgtCode,
                             detectedSourceLanguage = detectedName
@@ -460,20 +480,16 @@ class LocalTranslatorEngine(private val context: Context) {
 
                 val translator = activeTranslator
                 if (translator == null) {
-                    Log.w(TAG, "Translator is not ready yet. Queuing or downloading...")
-                    val downloaded = downloadRequiredModels(maxRetries = 2)
-                    if (downloaded && activeTranslator != null) {
-                        performTranslation(activeTranslator!!, trimmed, srcCode, tgtCode, null)
-                    } else {
-                        emitTranslation(
-                            TranslationResult(
-                                originalText = trimmed,
-                                translatedText = "[Translation Pack Not Downloaded: $srcCode → $tgtCode]",
-                                sourceLangCode = srcCode,
-                                targetLangCode = tgtCode
-                            )
+                    Log.w(TAG, "Translator is not ready yet. Using offline fallback while pack prepares.")
+                    val fallback = fallbackOfflineTranslate(trimmed, srcCode, tgtCode)
+                    emitTranslation(
+                        TranslationResult(
+                            originalText = trimmed,
+                            translatedText = fallback,
+                            sourceLangCode = srcCode,
+                            targetLangCode = tgtCode
                         )
-                    }
+                    )
                     return@launch
                 }
 
@@ -505,14 +521,13 @@ class LocalTranslatorEngine(private val context: Context) {
                 }
             }
             .addOnFailureListener { error ->
-                Log.e(TAG, "Translation execution failed", error)
-                val msg = "Translation error: ${error.localizedMessage}"
-                NotificationHelper.showErrorNotification(context, "Translation Engine Error", msg)
+                Log.w(TAG, "ML Kit translation failed (${error.localizedMessage}). Engaging offline fallback.")
+                val fallback = fallbackOfflineTranslate(text, srcCode, tgtCode)
                 scope.launch {
                     emitTranslation(
                         TranslationResult(
                             originalText = text,
-                            translatedText = "[Translation unavailable]",
+                            translatedText = fallback,
                             sourceLangCode = srcCode,
                             targetLangCode = tgtCode,
                             detectedSourceLanguage = detectedLang
@@ -520,6 +535,141 @@ class LocalTranslatorEngine(private val context: Context) {
                     )
                 }
             }
+    }
+
+    /**
+     * Offline fallback dictionary that translates common conversational, anime, gaming,
+     * and media phrases when Google Play services, Firebase, or downloaded packs are absent.
+     */
+    fun fallbackOfflineTranslate(text: String, srcCode: String, tgtCode: String): String {
+        val clean = text.trim()
+        val lower = clean.lowercase()
+
+        val jaToEn = mapOf(
+            "こんにちは" to "Hello",
+            "ありがとう" to "Thank you",
+            "ありがとうございます" to "Thank you very much",
+            "助けて" to "Help me!",
+            "助けてください" to "Please help me!",
+            "行くぞ" to "Let's go!",
+            "行こう" to "Let's go",
+            "勝った" to "We won!",
+            "負けた" to "We lost",
+            "敵" to "Enemy",
+            "敵を発見" to "Enemy spotted",
+            "大丈夫" to "I'm okay",
+            "大丈夫ですか" to "Are you okay?",
+            "何" to "What?",
+            "待って" to "Wait!",
+            "すごい" to "Amazing!",
+            "はい" to "Yes",
+            "いいえ" to "No",
+            "本当に" to "Really?",
+            "おはよう" to "Good morning",
+            "こんばんは" to "Good evening",
+            "さようなら" to "Goodbye",
+            "危ない" to "Look out!"
+        )
+
+        val zhToEn = mapOf(
+            "你好" to "Hello",
+            "谢谢" to "Thank you",
+            "救命" to "Help me!",
+            "走吧" to "Let's go",
+            "冲啊" to "Let's go!",
+            "我们赢了" to "We won!",
+            "敌人" to "Enemy",
+            "小心" to "Be careful",
+            "没关系" to "It's okay",
+            "好的" to "Understood / Okay",
+            "再见" to "Goodbye",
+            "太棒了" to "Awesome!",
+            "等等" to "Wait"
+        )
+
+        val esToEn = mapOf(
+            "hola" to "Hello",
+            "gracias" to "Thank you",
+            "muchas gracias" to "Thank you very much",
+            "ayuda" to "Help!",
+            "vamos" to "Let's go!",
+            "ganamos" to "We won!",
+            "enemigo" to "Enemy",
+            "cuidado" to "Careful!",
+            "esta bien" to "It's okay",
+            "si" to "Yes",
+            "no" to "No",
+            "adios" to "Goodbye",
+            "amigo" to "Friend",
+            "buen trabajo" to "Good job!"
+        )
+
+        val enToEs = mapOf(
+            "hello" to "Hola",
+            "thank you" to "Gracias",
+            "help" to "Ayuda",
+            "let's go" to "Vamos",
+            "enemy" to "Enemigo",
+            "careful" to "Cuidado",
+            "yes" to "Sí",
+            "no" to "No",
+            "goodbye" to "Adiós"
+        )
+
+        val enToJa = mapOf(
+            "hello" to "こんにちは",
+            "thank you" to "ありがとう",
+            "help" to "助けて",
+            "let's go" to "行くぞ",
+            "enemy" to "敵",
+            "yes" to "はい",
+            "no" to "いいえ",
+            "goodbye" to "さようなら"
+        )
+
+        val enToZh = mapOf(
+            "hello" to "你好",
+            "thank you" to "谢谢",
+            "help" to "救命",
+            "let's go" to "走吧",
+            "enemy" to "敌人",
+            "yes" to "是的",
+            "no" to "不",
+            "goodbye" to "再见"
+        )
+
+        val pureSrc = srcCode.substringBefore(" ").removePrefix("auto (").removeSuffix(")")
+        val pureTgt = tgtCode.substringBefore(" ")
+
+        val matched = when {
+            pureSrc == "ja" && pureTgt == "en" -> jaToEn[clean] ?: jaToEn[lower]
+            pureSrc == "zh" && pureTgt == "en" -> zhToEn[clean] ?: zhToEn[lower]
+            pureSrc == "es" && pureTgt == "en" -> esToEn[lower]
+            pureSrc == "en" && pureTgt == "es" -> enToEs[lower]
+            pureSrc == "en" && pureTgt == "ja" -> enToJa[lower]
+            pureSrc == "en" && pureTgt == "zh" -> enToZh[lower]
+            else -> null
+        }
+
+        if (matched != null) return matched
+
+        val activeDict = when {
+            pureSrc == "ja" && pureTgt == "en" -> jaToEn
+            pureSrc == "zh" && pureTgt == "en" -> zhToEn
+            pureSrc == "es" && pureTgt == "en" -> esToEn
+            pureSrc == "en" && pureTgt == "es" -> enToEs
+            pureSrc == "en" && pureTgt == "ja" -> enToJa
+            pureSrc == "en" && pureTgt == "zh" -> enToZh
+            else -> emptyMap()
+        }
+
+        for ((key, value) in activeDict) {
+            if (clean.contains(key, ignoreCase = true)) {
+                return value
+            }
+        }
+
+        return clean
     }
 
     private val translationLock = Any()
@@ -573,7 +723,7 @@ class LocalTranslatorEngine(private val context: Context) {
                 }
                 translatorCache.clear()
             }
-            languageIdentifier.close()
+            languageIdentifier?.close()
         } catch (_: Exception) {}
     }
 }

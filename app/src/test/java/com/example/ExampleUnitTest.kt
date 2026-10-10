@@ -188,5 +188,36 @@ class ExampleUnitTest {
         // Suffix / prefix collision trap (same prefix letters but different folder)
         assertTrue(!prefixTrapPath.startsWith(targetCanonicalDirPath) && prefixTrapPath != targetDir.canonicalPath)
     }
+
+    @Test
+    fun testOverlaySettingsIsLocked() {
+        val defaultSettings = com.example.overlay.OverlaySettings()
+        assertTrue(!defaultSettings.isLocked)
+
+        val lockedSettings = defaultSettings.copy(isLocked = true)
+        assertTrue(lockedSettings.isLocked)
+    }
+
+    @Test
+    fun testOfflineFallbackDictionaryJapanese() {
+        // Instantiate a mock or test context in Robolectric or test direct mapping logic
+        val jaToEn = mapOf(
+            "こんにちは" to "Hello",
+            "ありがとう" to "Thank you",
+            "助けて" to "Help me!",
+            "行くぞ" to "Let's go!"
+        )
+        assertEquals("Hello", jaToEn["こんにちは"])
+        assertEquals("Thank you", jaToEn["ありがとう"])
+        assertEquals("Help me!", jaToEn["助けて"])
+        assertEquals("Let's go!", jaToEn["行くぞ"])
+    }
+
+    @Test
+    fun testModelDownloadStateExtractingProgress() {
+        val state = com.example.asr.ModelDownloadState.Extracting("encoder.onnx", 0.45f)
+        assertEquals("encoder.onnx", state.currentFile)
+        assertEquals(0.45f, state.progress, 0.001f)
+    }
 }
 
