@@ -574,7 +574,8 @@ class ModelManager(private val context: Context) {
             val joiner = findFileInDir(dir, model.joinerFilename) ?: findFileByKeyword(dir, "joiner")
             val tokens = findFileInDir(dir, model.tokensFilename) ?: findFileByKeyword(dir, "tokens.txt")
 
-            if (hasUsableModelFile(encoder, 1_000_000L) &&
+            if (encoder != null && decoder != null && joiner != null && tokens != null &&
+                hasUsableModelFile(encoder, 1_000_000L) &&
                 hasUsableModelFile(decoder, 100_000L) &&
                 hasUsableModelFile(joiner, 10_000L) &&
                 hasUsableModelFile(tokens, 10L)
@@ -598,7 +599,8 @@ class ModelManager(private val context: Context) {
             val joi = File(sherpaDir, "joiner.int8.onnx").let { if (hasUsableModelFile(it, 10_000L)) it else findFileByKeyword(sherpaDir, "joiner") }
             val tok = File(sherpaDir, "tokens.txt").let { if (hasUsableModelFile(it, 10L)) it else findFileByKeyword(sherpaDir, "tokens") }
 
-            if (hasUsableModelFile(enc, 1_000_000L) &&
+            if (enc != null && dec != null && joi != null && tok != null &&
+                hasUsableModelFile(enc, 1_000_000L) &&
                 hasUsableModelFile(dec, 100_000L) &&
                 hasUsableModelFile(joi, 10_000L) &&
                 hasUsableModelFile(tok, 10L)
@@ -637,7 +639,8 @@ class ModelManager(private val context: Context) {
         val joiner = findFileByKeyword(rootDir, "joiner")
         val tokens = findFileByKeyword(rootDir, "tokens")
 
-        if (hasUsableModelFile(encoder, 1_000_000L) &&
+        if (encoder != null && decoder != null && joiner != null && tokens != null &&
+            hasUsableModelFile(encoder, 1_000_000L) &&
             hasUsableModelFile(decoder, 100_000L) &&
             hasUsableModelFile(joiner, 10_000L) &&
             hasUsableModelFile(tokens, 10L)

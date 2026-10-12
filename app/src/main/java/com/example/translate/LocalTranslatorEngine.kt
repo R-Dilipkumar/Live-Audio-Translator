@@ -88,6 +88,8 @@ class LocalTranslatorEngine(private val context: Context) {
     // Language list excluding Auto-Detect for target language selection
     val targetAvailableLanguages = availableLanguages.filter { !it.isAutoDetect }
 
+    var confidenceThreshold: Float = 0.55f
+
     private val _sourceLanguage = MutableStateFlow(availableLanguages[0]) // Auto-Detect by default
     val sourceLanguage: StateFlow<SupportedLanguage> = _sourceLanguage.asStateFlow()
 
@@ -579,11 +581,12 @@ class LocalTranslatorEngine(private val context: Context) {
                 )
             )
         } catch (error: Exception) {
-            Log.w(TAG, "ML Kit translation failed (${error.localizedMessage})")
+            Log.w(TAG, "ML Kit translation failed (${error.localizedMessage}), using offline fallback")
+            val fallbackText = fallbackOfflineTranslate(text, srcCode, tgtCode)
             emitTranslation(
                 TranslationResult(
                     originalText = text,
-                    translatedText = text,
+                    translatedText = fallbackText,
                     sourceLangCode = srcCode,
                     targetLangCode = tgtCode,
                     detectedSourceLanguage = detectedLang,
@@ -592,6 +595,92 @@ class LocalTranslatorEngine(private val context: Context) {
                 )
             )
         }
+    }
+
+    /**
+     * Self-contained offline dictionary fallback when Google Play Services / ML Kit
+     * are unavailable on device.
+     */
+    fun fallbackOfflineTranslate(text: String, sourceLang: String, targetLang: String): String {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return ""
+        val lower = trimmed.lowercase()
+
+        val jaToEn = mapOf(
+            "こんにちは" to "Hello",
+            "ありがとう" to "Thank you",
+            "ありがとうございます" to "Thank you very much",
+            "さようなら" to "Goodbye",
+            "はい" to "Yes",
+            "いいえ" to "No",
+            "おはよう" to "Good morning",
+            "こんばんは" to "Good evening"
+        )
+        val esToEn = mapOf(
+            "gracias" to "Thank you",
+            "muchas gracias" to "Thank you very much",
+            "hola" to "Hello",
+            "adiós" to "Goodbye",
+            "adios" to "Goodbye",
+            "si" to "Yes",
+            "sí" to "Yes",
+            "no" to "No",
+            "buenos días" to "Good morning",
+            "buenas noches" to "Good night"
+        )
+        val frToEn = mapOf(
+            "bonjour" to "Hello",
+            "merci" to "Thank you",
+            "au revoir" to "Goodbye",
+            "oui" to "Yes",
+            "non" to "No",
+            "salut" to "Hi"
+        )
+        val deToEn = mapOf(
+            "hallo" to "Hello",
+            "danke" to "Thank you",
+            "auf wiedersehen" to "Goodbye",
+            "ja" to "Yes",
+            "nein" to "No",
+            "guten tag" to "Good day"
+        )
+        val zhToEn = mapOf(
+            "你好" to "Hello",
+            "谢谢" to "Thank you",
+            "再见" to "Goodbye"
+        )
+
+        val srcCode = sourceLang.lowercase().take(2)
+        val tgtCode = targetLang.lowercase().take(2)
+
+        if (srcCode == tgtCode) return trimmed
+
+        val match = when (srcCode) {
+            "ja" -> jaToEn[trimmed] ?: jaToEn[lower]
+            "es" -> esToEn[trimmed] ?: esToEn[lower]
+            "fr" -> frToEn[trimmed] ?: frToEn[lower]
+            "de" -> deToEn[trimmed] ?: deToEn[lower]
+            "zh" -> zhToEn[trimmed] ?: zhToEn[lower]
+            else -> null
+        }
+
+        if (match != null && tgtCode == "en") {
+            return match
+        }
+
+        val enToOthers = mapOf(
+            "hello" to mapOf("es" to "Hola", "ja" to "こんにちは", "fr" to "Bonjour", "de" to "Hallo", "zh" to "你好"),
+            "thank you" to mapOf("es" to "Gracias", "ja" to "ありがとう", "fr" to "Merci", "de" to "Danke", "zh" to "谢谢"),
+            "goodbye" to mapOf("es" to "Adiós", "ja" to "さようなら", "fr" to "Au revoir", "de" to "Auf Wiedersehen", "zh" to "再见")
+        )
+        if (srcCode == "en") {
+            val tgtMap = enToOthers[lower]
+            if (tgtMap != null && tgtMap.containsKey(tgtCode)) {
+                return tgtMap[tgtCode] ?: trimmed
+            }
+        }
+
+        return trimmed
     }
 
     private val translationLock = Any()
