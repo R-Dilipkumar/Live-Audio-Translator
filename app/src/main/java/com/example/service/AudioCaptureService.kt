@@ -18,6 +18,7 @@ import android.util.Log
 import com.example.audio.AudioUtils
 import com.example.asr.ModelManager
 import com.example.asr.SpeechRecognizerEngine
+import com.example.asr.SpeechValidator
 import com.example.audio.VoiceIsolationProcessor
 import com.example.data.AppDatabase
 import com.example.data.SettingsRepository
@@ -511,107 +512,151 @@ class AudioCaptureService : Service() {
             _serviceErrorMessage.value = null
 
             // Continuous background bridge: forward recognized speech to local translator
+            // Debounces Partial ASR draft emissions (~480ms) and immediately dispatches Final commits
             recognitionForwardJob?.cancel()
             recognitionForwardJob = serviceScope.launch(Dispatchers.Default) {
-                speechEngine.recognizedTextFlow.collect { sentence ->
-                    if (sentence.isNotBlank()) {
-                        Log.d(TAG, "Forwarding recognized speech to translator: $sentence")
-                        translatorEngine.translateText(sentence)
-                    }
-                }
-            }
+                var lastPartialDispatchTime = 0L
+                val partialDebounceMs = 480L
 
-            // Persist transcripts to Room in background even when main app is closed
-            translationPersistJob?.cancel()
-            translationPersistJob = serviceScope.launch(Dispatchers.IO) {
-                translatorEngine.translationFlow.collect { result ->
-                    try {
-                        val entity = TranscriptEntity(
-                            originalText = result.originalText,
-                            translatedText = result.translatedText,
-                            sourceLanguage = result.sourceLangCode,
-                            targetLanguage = result.targetLangCode,
-                            timestamp = result.timestamp
-                        )
-                        transcriptDao.insert(entity)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed inserting transcript in background: ${e.message}")
-                    }
-                }
-            }
-
-            val shortBuffer = ShortArray(4096)
-            var silenceStartMs = 0L
-            val captureStartTime = System.currentTimeMillis()
-
-            try {
-                record.startRecording()
-                Log.i(TAG, "Audio capture loop started successfully with initialized ASR engine")
-
-                while (isCapturing && isActive) {
-                    val readShorts = record.read(shortBuffer, 0, shortBuffer.size)
-                    if (readShorts > 0) {
-                        // Downmix stereo to mono, resample to 16 kHz, normalize to [-1.0f, 1.0f]
-                        val floatSamples = AudioUtils.processRawAudioTo16kMonoFloats(
-                            stereoPcmBuffer = shortBuffer,
-                            readShorts = readShorts,
-                            sampleRate = sampleRate,
-                            isStereo = isStereo
-                        )
-
-                        // Voice Isolation DSP Filter (150Hz - 3500Hz bandpass) + Noise Gate (RMS threshold)
-                        val processedSamples = voiceIsolationProcessor.process(
-                            input = floatSamples,
-                            noiseGateThreshold = noiseGateLevel,
-                            isFilterEnabled = isVoiceIsolationActive
-                        )
-
-                        // Feed to SpeechRecognizerEngine
-                        speechEngine.feedAudioSamples(processedSamples)
-
-                        // Calculate RMS dB for UI visualizer
-                        val db = AudioUtils.calculateDbLevel(processedSamples)
-                        _liveAudioDb.value = db
-
-                        // Safeguard against premature DRM silence triggers:
-                        // Require at least 10s since capture start (allowing user to switch apps)
-                        // and 7s of continuous sub-5dB silence before alerting
-                        if (isStereo) {
+                speechEngine.utteranceFlow.collect { event ->
+                    when (event) {
+                        is com.example.asr.AsrUtteranceEvent.Partial -> {
                             val now = System.currentTimeMillis()
-                            val timeSinceCaptureStart = now - captureStartTime
-                            if (db < 5.0f) {
-                                if (silenceStartMs == 0L) {
-                                    silenceStartMs = now
-                                } else if (timeSinceCaptureStart >= 10000L && now - silenceStartMs >= 7000L) {
-                                    if (!_isDrmSilenceDetected.value) {
-                                        Log.w(TAG, "Continuous silence detected during internal audio playback (possible DRM)")
-                                        _isDrmSilenceDetected.value = true
-                                    }
+                            if (now - lastPartialDispatchTime >= partialDebounceMs) {
+                                if (SpeechValidator.isGenuineSpeech(event.text)) {
+                                    lastPartialDispatchTime = now
+                                    Log.d(TAG, "Forwarding throttled partial draft (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
+                                    translatorEngine.translateText(event.text, isFinal = false, utteranceId = event.utteranceId)
                                 }
-                            } else {
-                                silenceStartMs = 0L
-                                if (_isDrmSilenceDetected.value) {
-                                    _isDrmSilenceDetected.value = false
-                                }
+                            }
+                        }
+                        is com.example.asr.AsrUtteranceEvent.Final -> {
+                            if (SpeechValidator.isGenuineSpeech(event.text) && speechEngine.isConfirmedAsrEvent(event.text)) {
+                                Log.d(TAG, "Forwarding confirmed Final utterance (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
+                                translatorEngine.translateText(event.text, isFinal = true, utteranceId = event.utteranceId)
                             }
                         }
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in audio reading loop", e)
-                NotificationHelper.showErrorNotification(
-                    this@AudioCaptureService,
-                    "Audio Stream Interrupted",
-                    "The audio capture stream encountered an error: ${e.localizedMessage}"
-                )
-            } finally {
+            }
+
+            // Persist transcripts to Room in background even when main app is closed.
+            // Strictly verifies that the transcript contains genuine spoken dialogue, confirmed ASR events,
+            // and is a committed Final translation (never active partial drafts).
+            translationPersistJob?.cancel()
+            translationPersistJob = serviceScope.launch(Dispatchers.IO) {
+                translatorEngine.translationFlow.collect { result ->
+                    if (result.isFinal &&
+                        SpeechValidator.isGenuineSpeech(result.originalText) &&
+                        SpeechValidator.isGenuineSpeech(result.translatedText) &&
+                        speechEngine.isConfirmedAsrEvent(result.originalText)
+                    ) {
+                        try {
+                            val entity = TranscriptEntity(
+                                originalText = result.originalText,
+                                translatedText = result.translatedText,
+                                sourceLanguage = result.sourceLangCode,
+                                targetLanguage = result.targetLangCode,
+                                timestamp = result.timestamp
+                            )
+                            transcriptDao.insert(entity)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed inserting transcript in background: ${e.message}")
+                        }
+                    } else if (!result.isFinal) {
+                        // Draft translation: active UI display only, not persisted to Room
+                    } else {
+                        Log.d(TAG, "Suppressed non-speech transcript from Room persistence: ${result.originalText}")
+                    }
+                }
+            }
+
+            // Dedicated High-Priority Audio Buffer:
+            // Push raw PCM chunks immediately into a buffered Kotlin Channel<FloatArray>(capacity = 64).
+            // The audio read loop runs on a dedicated high-priority thread (THREAD_PRIORITY_URGENT_AUDIO)
+            // and never waits on decoding, translation, or locks.
+            val audioBufferChannel = kotlinx.coroutines.channels.Channel<FloatArray>(capacity = 64)
+
+            // Consumer coroutine: pulls audio buffers and feeds to SpeechRecognizerEngine
+            val decodingConsumerJob = serviceScope.launch(Dispatchers.Default) {
+                for (chunk in audioBufferChannel) {
+                    if (!isCapturing || !isActive) break
+                    speechEngine.feedAudioSamples(chunk)
+                }
+            }
+
+            val audioCaptureThread = kotlin.concurrent.thread(
+                name = "AudioCaptureThread",
+                priority = Thread.MAX_PRIORITY,
+                start = false
+            ) {
                 try {
-                    record.stop()
-                    record.release()
-                } catch (_: Exception) {}
-                speechEngine.flushCurrentSegment()
-                _liveAudioDb.value = 0f
-                _isDrmSilenceDetected.value = false
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed setting urgent audio thread priority: ${e.message}")
+                }
+
+                val shortBuffer = ShortArray(4096)
+                try {
+                    record.startRecording()
+                    Log.i(TAG, "Audio capture loop started successfully on dedicated thread with initialized ASR engine")
+
+                    while (isCapturing && isActive) {
+                        val readShorts = record.read(shortBuffer, 0, shortBuffer.size)
+                        if (readShorts > 0) {
+                            // Downmix stereo to mono, resample to 16 kHz, normalize to [-1.0f, 1.0f]
+                            val floatSamples = AudioUtils.processRawAudioTo16kMonoFloats(
+                                stereoPcmBuffer = shortBuffer,
+                                readShorts = readShorts,
+                                sampleRate = sampleRate,
+                                isStereo = isStereo
+                            )
+
+                            // Voice Isolation DSP Filter (150Hz - 3500Hz bandpass) + Noise Gate (RMS threshold)
+                            val processedSamples = voiceIsolationProcessor.process(
+                                input = floatSamples,
+                                noiseGateThreshold = noiseGateLevel,
+                                isFilterEnabled = isVoiceIsolationActive
+                            )
+
+                            // Non-blocking push into buffered Kotlin Channel (capacity = 64)
+                            // If channel capacity is momentarily full, trySend drops or oldest rather than blocking audio capture
+                            audioBufferChannel.trySend(processedSamples)
+
+                            // Calculate RMS dB for UI visualizer
+                            val db = AudioUtils.calculateDbLevel(processedSamples)
+                            _liveAudioDb.value = db
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in audio reading loop", e)
+                    NotificationHelper.showErrorNotification(
+                        this@AudioCaptureService,
+                        "Audio Stream Interrupted",
+                        "The audio capture stream encountered an error: ${e.localizedMessage}"
+                    )
+                } finally {
+                    try {
+                        record.stop()
+                        record.release()
+                    } catch (_: Exception) {}
+                    audioBufferChannel.close()
+                    speechEngine.flushCurrentSegment()
+                    _liveAudioDb.value = 0f
+                    _isDrmSilenceDetected.value = false
+                }
+            }
+
+            audioCaptureThread.start()
+
+            try {
+                // Keep the captureJob coroutine active while capturing
+                while (isCapturing && isActive) {
+                    kotlinx.coroutines.delay(200)
+                }
+            } finally {
+                audioCaptureThread.interrupt()
+                decodingConsumerJob.cancel()
             }
         }
     }

@@ -26,6 +26,7 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.example.asr.SpeechValidator
 import com.example.data.SettingsRepository
 import com.example.service.AudioCaptureService
 import com.example.ui.components.DraggableSubtitleBox
@@ -75,7 +76,7 @@ class FloatingSubtitleService : Service() {
     private var overlayLifecycleOwner: OverlayLifecycleOwner? = null
 
     // Service-level coroutine scope tied to service lifecycle, NOT main Activity
-    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
     private var translationCollectJob: Job? = null
     private var partialCollectJob: Job? = null
     private var drmCollectJob: Job? = null
@@ -89,6 +90,12 @@ class FloatingSubtitleService : Service() {
 
     private val _floatingTranslatedText = MutableStateFlow("Subtitles will stream here...")
     val floatingTranslatedText: StateFlow<String> = _floatingTranslatedText.asStateFlow()
+
+    private val _floatingTranslatedIsFinal = MutableStateFlow(true)
+    val floatingTranslatedIsFinal: StateFlow<Boolean> = _floatingTranslatedIsFinal.asStateFlow()
+
+    private val _floatingUtteranceId = MutableStateFlow(0L)
+    val floatingUtteranceId: StateFlow<Long> = _floatingUtteranceId.asStateFlow()
 
     private val _floatingPartialText = MutableStateFlow("")
     val floatingPartialText: StateFlow<String> = _floatingPartialText.asStateFlow()
@@ -226,6 +233,8 @@ class FloatingSubtitleService : Service() {
         composeView.setContent {
             val originalText by floatingOriginalText.collectAsStateWithLifecycle()
             val translatedText by floatingTranslatedText.collectAsStateWithLifecycle()
+            val isTranslatedFinal by floatingTranslatedIsFinal.collectAsStateWithLifecycle()
+            val utteranceId by floatingUtteranceId.collectAsStateWithLifecycle()
             val partialText by floatingPartialText.collectAsStateWithLifecycle()
             val settings by currentSettings.collectAsStateWithLifecycle()
             val isDrm by floatingDrmSilence.collectAsStateWithLifecycle()
@@ -233,6 +242,8 @@ class FloatingSubtitleService : Service() {
             DraggableSubtitleBox(
                 originalText = originalText,
                 translatedText = translatedText,
+                isTranslatedFinal = isTranslatedFinal,
+                utteranceId = utteranceId,
                 partialText = partialText,
                 settings = settings,
                 isDrmSilenceDetected = isDrm,
@@ -249,7 +260,7 @@ class FloatingSubtitleService : Service() {
                             val repo = SettingsRepository(this@FloatingSubtitleService)
                             repo.updateFontSize(newSettings.fontSizeSp)
                             repo.updateOverlayOpacity(newSettings.opacity)
-                            repo.updateMaxDisplayLines(newSettings.maxLines)
+                            repo.updateMaxDisplayLines(newSettings.maxSubtitleLines)
                             repo.updateShowOriginalSpeech(newSettings.showOriginal)
                             repo.updateSubtitleLingerTime(newSettings.lingerTimeSeconds)
                             repo.updateTextOutlineShadow(newSettings.isTextOutlineShadowEnabled)
@@ -341,6 +352,7 @@ class FloatingSubtitleService : Service() {
                     _currentSettings.value = _currentSettings.value.copy(
                         fontSizeSp = appSettings.fontSizeSp,
                         opacity = appSettings.overlayOpacity,
+                        maxSubtitleLines = appSettings.maxDisplayLines,
                         maxLines = appSettings.maxDisplayLines,
                         showOriginal = appSettings.showOriginalSpeech,
                         lingerTimeSeconds = appSettings.subtitleLingerTimeSeconds,
@@ -353,47 +365,37 @@ class FloatingSubtitleService : Service() {
 
         // Immediately hydrate initial values from translator engine if available
         translator.latestTranslation.value?.let { initial ->
-            if (initial.originalText.isNotBlank()) {
+            if (SpeechValidator.isGenuineSpeech(initial.originalText) && speech.isConfirmedAsrEvent(initial.originalText)) {
                 _floatingOriginalText.value = initial.originalText
             }
-            if (initial.translatedText.isNotBlank()) {
+            if (SpeechValidator.isGenuineSpeech(initial.translatedText)) {
                 _floatingTranslatedText.value = initial.translatedText
             }
         }
 
-        var lastTranslationUpdateTime = 0L
-        var lastPartialUpdateTime = 0L
-        val minUpdateIntervalMs = 60L
-
+        // Direct State Emission: Synchronize _floatingTranslatedText and _floatingOriginalText immediately
+        // on Dispatchers.Main.immediate without artificial throttling or delay pauses.
+        // Pure speech validation ensures status strings never pollute display states.
         translationCollectJob?.cancel()
-        translationCollectJob = serviceScope.launch {
+        translationCollectJob = serviceScope.launch(Dispatchers.Main.immediate) {
             translator.translationFlow.collect { result ->
-                if (!_currentSettings.value.isPaused) {
-                    val now = System.currentTimeMillis()
-                    val timeSinceLast = now - lastTranslationUpdateTime
-                    if (timeSinceLast < minUpdateIntervalMs) {
-                        kotlinx.coroutines.delay(minUpdateIntervalMs - timeSinceLast)
-                    }
-                    lastTranslationUpdateTime = System.currentTimeMillis()
-
+                if (!_currentSettings.value.isPaused &&
+                    SpeechValidator.isGenuineSpeech(result.originalText) &&
+                    SpeechValidator.isGenuineSpeech(result.translatedText)
+                ) {
                     _floatingOriginalText.value = result.originalText
                     _floatingTranslatedText.value = result.translatedText
+                    _floatingTranslatedIsFinal.value = result.isFinal
+                    _floatingUtteranceId.value = result.utteranceId
                 }
             }
         }
 
         partialCollectJob?.cancel()
-        partialCollectJob = serviceScope.launch {
+        partialCollectJob = serviceScope.launch(Dispatchers.Main.immediate) {
             speech.partialTextFlow.collect { partial ->
                 if (!_currentSettings.value.isPaused) {
-                    val now = System.currentTimeMillis()
-                    val timeSinceLast = now - lastPartialUpdateTime
-                    if (timeSinceLast < minUpdateIntervalMs) {
-                        kotlinx.coroutines.delay(minUpdateIntervalMs - timeSinceLast)
-                    }
-                    lastPartialUpdateTime = System.currentTimeMillis()
-
-                    _floatingPartialText.value = partial
+                    _floatingPartialText.value = if (SpeechValidator.isGenuineSpeech(partial)) partial else ""
                 }
             }
         }

@@ -2,6 +2,9 @@ package com.example.ui
 
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.items
@@ -16,11 +19,17 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.material3.LinearProgressIndicator
+import com.example.asr.DownloadState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FitScreen
+import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.ManageAccounts
 import androidx.compose.material.icons.filled.Mic
@@ -67,9 +76,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.asr.SpeechValidator
 import com.example.ui.components.AudioVisualizer
 import com.example.ui.components.DraggableSubtitleBox
 import com.example.ui.components.HistoryBottomSheet
@@ -100,6 +111,7 @@ fun MainScreen(
     val isOverlayActive by viewModel.isFloatingOverlayActive.collectAsStateWithLifecycle()
     val overlaySettings by viewModel.floatingSettings.collectAsStateWithLifecycle()
     val isDrmSilenceDetected by viewModel.isDrmSilenceDetected.collectAsStateWithLifecycle()
+    val sherpaDownloadState by viewModel.sherpaDownloadState.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedTab by remember { mutableIntStateOf(0) } // 0: Translate, 1: Manage Models
@@ -107,6 +119,22 @@ fun MainScreen(
     val context = LocalContext.current
 
     var showHistorySheet by remember { mutableStateOf(false) }
+
+    // Guarded First-Launch Model Setup Flow:
+    // On cold launch, check if model files are ready. If missing, trigger download and show onboarding dialog.
+    // Do NOT call viewModel.initializeSpeechRecognizer() here on cold launch.
+    LaunchedEffect(Unit) {
+        if (!viewModel.isSherpaModelReady()) {
+            viewModel.downloadSherpaModel()
+        }
+    }
+
+    // Only initialize recognizer when ModelManager.downloadSherpaModel() completes with DownloadState.Ready
+    LaunchedEffect(sherpaDownloadState) {
+        if (sherpaDownloadState is DownloadState.Ready && viewModel.isSherpaModelReady()) {
+            viewModel.initializeSpeechRecognizer()
+        }
+    }
 
     LaunchedEffect(errorMessage) {
         errorMessage?.let { msg ->
@@ -477,31 +505,51 @@ fun MainScreen(
                                 }
                             }
 
-                            if (history.isEmpty() && (originalSpeech.startsWith("Waiting") || originalSpeech.isBlank())) {
-                                // Empty state
+                            val hasActiveSpeech = isCapturing && (SpeechValidator.isGenuineSpeech(partialSpeech) || SpeechValidator.isGenuineSpeech(originalSpeech))
+
+                            if (history.isEmpty() && !hasActiveSpeech) {
+                                // Clean Empty State UI:
+                                // If no speech has been captured yet, show a clean, centered Compose empty-state placeholder
+                                // rather than inserting synthetic status items into the list.
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .padding(16.dp),
+                                        .padding(24.dp)
+                                        .testTag("empty_state_container"),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Icon(
-                                            imageVector = Icons.Default.Translate,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                            modifier = Modifier.size(36.dp)
-                                        )
-                                        Spacer(modifier = Modifier.height(8.dp))
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(24.dp),
+                                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                                            modifier = Modifier.size(64.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Hearing,
+                                                    contentDescription = "Waiting for speech",
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(32.dp)
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(14.dp))
                                         Text(
-                                            text = "Ready to transcribe & translate audio",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            text = "Waiting for speech... Speak into mic or play audio",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            textAlign = TextAlign.Center
                                         )
+                                        Spacer(modifier = Modifier.height(6.dp))
                                         Text(
-                                            text = "Press 'Start' below to stream live subtitles",
+                                            text = if (isCapturing) "Listening for incoming dialogue..." else "Press 'Start Subtitle Translation' below to begin",
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                            textAlign = TextAlign.Center
                                         )
                                     }
                                 }
@@ -599,7 +647,8 @@ fun MainScreen(
                                     }
 
                                     // Currently streaming live speech card (partial & latest)
-                                    if (isCapturing && (partialSpeech.isNotBlank() || (originalSpeech.isNotBlank() && !originalSpeech.startsWith("Waiting")))) {
+                                    val isLiveSpeechActive = isCapturing && (SpeechValidator.isGenuineSpeech(partialSpeech) || SpeechValidator.isGenuineSpeech(originalSpeech))
+                                    if (isLiveSpeechActive) {
                                         item {
                                             Card(
                                                 modifier = Modifier
@@ -630,8 +679,8 @@ fun MainScreen(
                                                         )
                                                     }
 
-                                                    val liveOriginal = if (partialSpeech.isNotBlank()) {
-                                                        if (originalSpeech.isNotBlank() && !originalSpeech.startsWith("Waiting")) {
+                                                    val liveOriginal = if (SpeechValidator.isGenuineSpeech(partialSpeech)) {
+                                                        if (SpeechValidator.isGenuineSpeech(originalSpeech)) {
                                                             "$originalSpeech $partialSpeech"
                                                         } else {
                                                             partialSpeech
@@ -640,7 +689,7 @@ fun MainScreen(
                                                         originalSpeech
                                                     }
 
-                                                    if (liveOriginal.isNotBlank() && !liveOriginal.startsWith("Waiting")) {
+                                                    if (SpeechValidator.isGenuineSpeech(liveOriginal)) {
                                                         Text(
                                                             text = liveOriginal,
                                                             style = MaterialTheme.typography.bodySmall,
@@ -649,7 +698,7 @@ fun MainScreen(
                                                         )
                                                     }
 
-                                                    if (translatedSpeech.isNotBlank() && !translatedSpeech.startsWith("Translation will appear")) {
+                                                    if (SpeechValidator.isGenuineSpeech(translatedSpeech)) {
                                                         Spacer(modifier = Modifier.height(2.dp))
                                                         Text(
                                                             text = translatedSpeech,
@@ -745,5 +794,197 @@ fun MainScreen(
             onClearAll = { viewModel.clearHistory() },
             onDeleteItem = { id -> viewModel.deleteHistoryItem(id) }
         )
+    }
+
+    // First-Launch Onboarding Modal: Non-dismissible Material 3 Dialog
+    val isSherpaReady = viewModel.isSherpaModelReady() || sherpaDownloadState is DownloadState.Ready
+    if (!isSherpaReady) {
+        Dialog(
+            onDismissRequest = { /* Non-dismissible: required for offline transcription */ },
+            properties = DialogProperties(
+                dismissOnBackPress = false,
+                dismissOnClickOutside = false
+            )
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
+                    .testTag("first_launch_model_setup_dialog"),
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(60.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Hearing,
+                            contentDescription = null,
+                            modifier = Modifier.size(32.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text(
+                        text = "Download Speech Recognition Engine",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Text(
+                        text = "This is a one-time ~40MB download required for offline transcription. All voice recognition runs directly on your device with complete privacy.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    when (val state = sherpaDownloadState) {
+                        is DownloadState.Downloading -> {
+                            val animatedProgress by animateFloatAsState(
+                                targetValue = state.progress,
+                                animationSpec = tween(durationMillis = 200, easing = LinearEasing),
+                                label = "model_download_progress"
+                            )
+
+                            LinearProgressIndicator(
+                                progress = { animatedProgress },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .testTag("model_linear_progress_indicator"),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val percent = (state.progress * 100).toInt()
+                                Text(
+                                    text = "$percent%",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+
+                                val speedText = if (state.speedBytesPerSec > 1024 * 1024) {
+                                    String.format("%.1f MB/s", state.speedBytesPerSec / (1024f * 1024f))
+                                } else if (state.speedBytesPerSec > 1024) {
+                                    "${state.speedBytesPerSec / 1024} KB/s"
+                                } else {
+                                    "Downloading…"
+                                }
+
+                                Text(
+                                    text = speedText,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.testTag("model_download_speed")
+                                )
+                            }
+
+                            if (state.totalBytes > 0) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                val downloadedMb = state.bytesDownloaded / (1024f * 1024f)
+                                val totalMb = state.totalBytes / (1024f * 1024f)
+                                Text(
+                                    text = String.format("%.1f MB / %.1f MB", downloadedMb, totalMb),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        is DownloadState.Extracting -> {
+                            LinearProgressIndicator(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .testTag("model_extracting_progress_indicator"),
+                                color = MaterialTheme.colorScheme.tertiary,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Text(
+                                text = "Extracting & configuring models…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        is DownloadState.Error -> {
+                            Text(
+                                text = state.message,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                textAlign = TextAlign.Center
+                            )
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            Button(
+                                onClick = { viewModel.downloadSherpaModel() },
+                                modifier = Modifier.testTag("retry_model_download_button")
+                            ) {
+                                Text("Retry Download")
+                            }
+                        }
+
+                        is DownloadState.Idle -> {
+                            LinearProgressIndicator(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp)),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Text(
+                                text = "Preparing download…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        is DownloadState.Ready -> {
+                            // Automatically dismissed
+                        }
+                    }
+                }
+            }
+        }
     }
 }

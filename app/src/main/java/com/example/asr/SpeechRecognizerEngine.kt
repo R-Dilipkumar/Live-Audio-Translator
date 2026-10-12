@@ -28,8 +28,14 @@ import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.abs
 
+sealed class AsrUtteranceEvent {
+    data class Partial(val text: String, val utteranceId: Long = 0L, val timestamp: Long = System.currentTimeMillis()) : AsrUtteranceEvent()
+    data class Final(val text: String, val utteranceId: Long = 0L, val timestamp: Long = System.currentTimeMillis()) : AsrUtteranceEvent()
+}
+
 sealed class RecognizerState {
     object Uninitialized : RecognizerState()
+    object NotReady : RecognizerState()
     object Initializing : RecognizerState()
     object Ready : RecognizerState()
     object Listening : RecognizerState()
@@ -43,10 +49,14 @@ class SpeechRecognizerEngine(
     private val TAG = "SpeechRecognizerEngine"
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    private val _engineState = MutableStateFlow<RecognizerState>(RecognizerState.Uninitialized)
+    private val _engineState = MutableStateFlow<RecognizerState>(RecognizerState.NotReady)
     val engineState: StateFlow<RecognizerState> = _engineState.asStateFlow()
 
-    // Emits completed or segmented recognized text strings
+    // Structured utterance event stream differentiating Partial (draft) and Final (committed)
+    private val _utteranceFlow = MutableSharedFlow<AsrUtteranceEvent>(extraBufferCapacity = 64)
+    val utteranceFlow: SharedFlow<AsrUtteranceEvent> = _utteranceFlow.asSharedFlow()
+
+    // Emits completed or segmented recognized text strings (Final commits)
     private val _recognizedTextFlow = MutableSharedFlow<String>(extraBufferCapacity = 64)
     val recognizedTextFlow: SharedFlow<String> = _recognizedTextFlow.asSharedFlow()
 
@@ -61,9 +71,17 @@ class SpeechRecognizerEngine(
     private var streamEmittedLength = 0
     private var isSherpaLoaded = false
 
+    // Monotonically incrementing utterance epoch tag
+    private val utteranceEpochCounter = java.util.concurrent.atomic.AtomicLong(1L)
+    @Volatile
+    private var currentUtteranceId: Long = 1L
+
     // Configurable endpointing parameters
-    var silenceEndpointDelay: Float = 1.1f
-    var maxUtteranceWindow: Float = 15.0f
+    // rule1: 2.4f trailing silence for short phrases to prevent mid-sentence cuts
+    // rule2: 1.4f trailing silence after continuous speech
+    // rule3: 25.0f allow long continuous clauses before forcing an endpoint
+    var silenceEndpointDelay: Float = 1.4f
+    var maxUtteranceWindow: Float = 25.0f
     var isAntiFreezeWatchdogEnabled: Boolean = true
 
     // Anti-freeze watchdog tracking
@@ -84,6 +102,21 @@ class SpeechRecognizerEngine(
     private val pcmChunkAccumulator = ArrayDeque<Float>(CHUNK_SIZE_SAMPLES * 4)
     // Pre-allocated chunk buffer to eliminate allocations on the audio processing thread (prevents GC churn)
     private val reusableChunk = FloatArray(CHUNK_SIZE_SAMPLES)
+
+    // Tracks verified native ASR recognitions to ensure events originate from the native recognizer
+    private val confirmedAsrEvents = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+
+    /**
+     * Confirms that [text] originated from a verified native ASR recognition event
+     * and is not an empty string or system diagnostic/status message.
+     */
+    fun isConfirmedAsrEvent(text: String?): Boolean {
+        if (!SpeechValidator.isGenuineSpeech(text)) return false
+        val normalized = text!!.trim()
+        return synchronized(confirmedAsrEvents) {
+            confirmedAsrEvents.contains(normalized)
+        }
+    }
 
     init {
         try {
@@ -108,14 +141,16 @@ class SpeechRecognizerEngine(
 
         _engineState.value = RecognizerState.Initializing
 
-        // Verify that model files are downloaded and verified ready asynchronously across disk
-        val resolved = modelManager.resolveModelFiles(modelManager.selectedModel.value)
+        // Safety check: verify complete, non-empty ONNX model files (> 1MB) exist before calling native C++
+        val resolved = resolveVerifiedModelFiles()
         if (resolved == null) {
             val error = "ASR Model not initialized. Please install model in Manage Models."
             Log.w(TAG, error)
             _engineState.value = RecognizerState.Error(error)
             return@runBlocking false
         }
+
+        _engineState.value = RecognizerState.Initializing
 
         try {
             release()
@@ -141,10 +176,14 @@ class SpeechRecognizerEngine(
                 modelType = "zipformer2"
             )
 
+            // Tuned endpointing parameters:
+            // rule1: minTrailingSilence = 2.4f (trailing silence for short phrases to prevent mid-sentence cuts)
+            // rule2: minTrailingSilence = 1.4f (trailing silence after continuous speech > 3.0s)
+            // rule3: minUtteranceLength = 25.0f (allow long continuous clauses before forcing an endpoint)
             val endpointConfig = EndpointConfig(
-                rule1 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = false, minTrailingSilence = 1.2f, minUtteranceLength = 0.0f),
-                rule2 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = true, minTrailingSilence = silenceEndpointDelay, minUtteranceLength = 1.5f),
-                rule3 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = false, minTrailingSilence = 0.0f, minUtteranceLength = maxUtteranceWindow)
+                rule1 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = false, minTrailingSilence = 2.4f, minUtteranceLength = 0.0f),
+                rule2 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = true, minTrailingSilence = 1.4f, minUtteranceLength = 3.0f),
+                rule3 = com.k2fsa.sherpa.onnx.EndpointRule(mustContainNonSilence = false, minTrailingSilence = 0.0f, minUtteranceLength = 25.0f)
             )
 
             val recognizerConfig = OnlineRecognizerConfig(
@@ -155,8 +194,8 @@ class SpeechRecognizerEngine(
                 decodingMethod = "greedy_search"
             )
 
+            // OnlineRecognizer(config) with absolute file paths rather than OnlineRecognizer(assetManager, config)
             val recognizer = OnlineRecognizer(
-                assetManager = null,
                 config = recognizerConfig
             )
 
@@ -165,7 +204,7 @@ class SpeechRecognizerEngine(
                 onlineStream = recognizer.createStream()
             }
             _engineState.value = RecognizerState.Ready
-            Log.i(TAG, "Sherpa-ONNX speech recognizer initialized successfully with model: ${resolved.model.id}")
+            Log.i(TAG, "Sherpa-ONNX speech recognizer initialized successfully with model: ${resolved.modelId}")
             return@runBlocking true
 
         } catch (t: Throwable) {
@@ -175,6 +214,88 @@ class SpeechRecognizerEngine(
             NotificationHelper.showErrorNotification(context, "ASR Engine Crash", error)
             return@runBlocking false
         }
+    }
+
+    /**
+     * Initializes the recognizer asynchronously in a background coroutine worker.
+     * Safely checks that complete model files (> 1MB) exist on disk before invoking native C++ constructors.
+     * If model files are missing or incomplete, cleanly sets [RecognizerState.NotReady].
+     */
+    fun initializeEngineAsync(onComplete: ((Boolean) -> Unit)? = null) {
+        scope.launch(Dispatchers.IO) {
+            val resolved = resolveVerifiedModelFiles()
+            if (resolved == null) {
+                _engineState.value = RecognizerState.NotReady
+                onComplete?.invoke(false)
+                return@launch
+            }
+            val success = initEngine()
+            onComplete?.invoke(success)
+        }
+    }
+
+    data class LoadedModelFiles(
+        val modelId: String,
+        val encoderFile: File,
+        val decoderFile: File,
+        val joinerFile: File,
+        val tokensFile: File
+    )
+
+    /**
+     * Checks if internal models directory contains complete, verified ONNX model files (> 1MB per file).
+     */
+    fun hasValidModelFilesOnDisk(): Boolean {
+        return resolveVerifiedModelFiles() != null
+    }
+
+    /**
+     * Resolves verified model files from internal app storage.
+     * Requires non-empty size validation (> 1MB per ONNX file, > 10 bytes for tokens)
+     * to prevent native SIGABRT crashes caused by stub/truncated files.
+     */
+    private fun resolveVerifiedModelFiles(): LoadedModelFiles? {
+        val sherpaDir = File(context.filesDir, "models/sherpa-onnx")
+
+        // 1. Primary Path: Internal app storage models/sherpa-onnx
+        resolveFromDirectory(sherpaDir, "sherpa-onnx-internal")?.let { return it }
+
+        // 2. Fallback: ModelManager resolution with strict > 1MB validation
+        val resolved = modelManager.resolveModelFiles(modelManager.selectedModel.value)
+        if (resolved != null &&
+            resolved.encoderFile.length() > 1_000_000L &&
+            resolved.decoderFile.length() > 1_000_000L &&
+            resolved.joinerFile.length() > 1_000_000L &&
+            resolved.tokensFile.length() > 10L
+        ) {
+            return LoadedModelFiles(
+                modelId = resolved.model.id,
+                encoderFile = resolved.encoderFile,
+                decoderFile = resolved.decoderFile,
+                joinerFile = resolved.joinerFile,
+                tokensFile = resolved.tokensFile
+            )
+        }
+        return null
+    }
+
+    private fun resolveFromDirectory(dir: File, id: String): LoadedModelFiles? {
+        if (!dir.exists() || !dir.isDirectory) return null
+
+        val minOnnxSize = 1_000_000L // 1 MB per ONNX file validation
+        val enc = File(dir, "encoder.int8.onnx").let { if (it.exists() && it.length() > minOnnxSize) it else modelManager.findFileByKeyword(dir, "encoder") }
+        val dec = File(dir, "decoder.int8.onnx").let { if (it.exists() && it.length() > minOnnxSize) it else modelManager.findFileByKeyword(dir, "decoder") }
+        val joi = File(dir, "joiner.int8.onnx").let { if (it.exists() && it.length() > minOnnxSize) it else modelManager.findFileByKeyword(dir, "joiner") }
+        val tok = File(dir, "tokens.txt").let { if (it.exists() && it.length() > 10L) it else modelManager.findFileByKeyword(dir, "tokens") }
+
+        if (enc != null && enc.length() > minOnnxSize &&
+            dec != null && dec.length() > minOnnxSize &&
+            joi != null && joi.length() > minOnnxSize &&
+            tok != null && tok.length() > 10L
+        ) {
+            return LoadedModelFiles(id, enc, dec, joi, tok)
+        }
+        return null
     }
 
     /**
@@ -226,78 +347,29 @@ class SpeechRecognizerEngine(
 
                         val result = recognizer.getResult(stream)
                         val fullText = result.text
-
-                        // Sentence-level buffering: find punctuation boundaries (. , ? ! etc.)
-                        // to extract complete clauses before passing to translation
-                        val punctuationMarks = charArrayOf('.', ',', '?', '!', '。', '，', '？', '！', ';', '；', ':')
-                        var uncommitted = if (streamEmittedLength < fullText.length) {
-                            fullText.substring(streamEmittedLength)
-                        } else {
-                            ""
-                        }
-
-                        var punctIndex = uncommitted.indexOfAny(punctuationMarks)
-                        while (punctIndex >= 0) {
-                            val completeClause = uncommitted.substring(0, punctIndex + 1).trim()
-                            if (completeClause.isNotBlank()) {
-                                Log.d(TAG, "Punctuation boundary sentence detected: $completeClause")
-                                lastOutputOrResetTime = System.currentTimeMillis()
-                                emitSentence(completeClause)
-                            }
-                            streamEmittedLength += (punctIndex + 1)
-                            uncommitted = if (streamEmittedLength < fullText.length) {
-                                fullText.substring(streamEmittedLength)
-                            } else {
-                                ""
-                            }
-                            punctIndex = uncommitted.indexOfAny(punctuationMarks)
-                        }
-
-                        // Any trailing in-progress clause is shown as partial
-                        val currentPartial = if (streamEmittedLength < fullText.length) {
-                            fullText.substring(streamEmittedLength).trim()
-                        } else {
-                            ""
-                        }
-
-                        if (currentPartial != _partialTextFlow.value) {
-                            _partialTextFlow.value = currentPartial
-                        }
+                        // Accumulate full clause in progress
+                        val currentText = fullText.trim()
+                        val sanitizedDraft = if (SpeechValidator.isGenuineSpeech(currentText)) currentText else ""
 
                         val isEndpoint = recognizer.isEndpoint(stream)
                         if (isEndpoint) {
-                            val finalClause = if (streamEmittedLength < fullText.length) {
-                                fullText.substring(streamEmittedLength).trim()
-                            } else {
-                                ""
-                            }
-                            if (finalClause.isNotBlank()) {
-                                Log.d(TAG, "Speech endpoint reached: $finalClause")
-                                emitSentence(finalClause)
-                            }
-                            streamEmittedLength = 0
-                            lastEmittedText = ""
-                            _partialTextFlow.value = ""
-                            lastOutputOrResetTime = System.currentTimeMillis()
-                            recognizer.reset(stream)
-                        }
-
-                        // Anti-Freeze Watchdog:
-                        // If continuous audio processing occurs for > 6 seconds without any output or endpointing,
-                        // automatically flush/reset the stream to recover from stalled decoder states
-                        if (isAntiFreezeWatchdogEnabled) {
-                            val timeSinceLast = System.currentTimeMillis() - lastOutputOrResetTime
-                            if (timeSinceLast >= 6000L) {
-                                Log.w(TAG, "Anti-Freeze Watchdog: 6 seconds of audio with no output. Auto-recovering stream.")
-                                val stalledText = fullText.substring(streamEmittedLength.coerceAtMost(fullText.length)).trim()
-                                if (stalledText.isNotBlank()) {
-                                    emitSentence(stalledText)
-                                }
-                                streamEmittedLength = 0
-                                lastEmittedText = ""
-                                _partialTextFlow.value = ""
+                            val epochId = currentUtteranceId
+                            if (sanitizedDraft.isNotBlank()) {
+                                Log.d(TAG, "Speech endpoint reached (utteranceId=$epochId). Emitting Final: $sanitizedDraft")
                                 lastOutputOrResetTime = System.currentTimeMillis()
-                                recognizer.reset(stream)
+                                emitFinalUtterance(sanitizedDraft, epochId)
+                            }
+                            _partialTextFlow.value = ""
+                            lastEmittedText = ""
+                            streamEmittedLength = 0
+                            // Synchronously reset recognizer stream to be immediately ready for subsequent incoming audio frames
+                            recognizer.reset(stream)
+                            // Advance to next utterance epoch for subsequent speech
+                            currentUtteranceId = utteranceEpochCounter.incrementAndGet()
+                        } else {
+                            if (sanitizedDraft.isNotBlank() && sanitizedDraft != _partialTextFlow.value) {
+                                _partialTextFlow.value = sanitizedDraft
+                                emitPartialUtterance(sanitizedDraft, currentUtteranceId)
                             }
                         }
                     }
@@ -318,10 +390,38 @@ class SpeechRecognizerEngine(
         }
     }
 
-    private fun emitSentence(clause: String) {
-        if (!_recognizedTextFlow.tryEmit(clause)) {
+    private fun emitPartialUtterance(draft: String, utteranceId: Long) {
+        val trimmed = draft.trim()
+        if (!SpeechValidator.isGenuineSpeech(trimmed)) return
+        val event = AsrUtteranceEvent.Partial(trimmed, utteranceId = utteranceId)
+        if (!_utteranceFlow.tryEmit(event)) {
+            scope.launch { _utteranceFlow.emit(event) }
+        }
+    }
+
+    private fun emitFinalUtterance(clause: String, utteranceId: Long) {
+        val trimmed = clause.trim()
+        if (!SpeechValidator.isGenuineSpeech(trimmed)) {
+            Log.d(TAG, "Suppressed non-speech status/diagnostic phrase from ASR emission: $trimmed")
+            return
+        }
+        synchronized(confirmedAsrEvents) {
+            confirmedAsrEvents.add(trimmed)
+            if (confirmedAsrEvents.size > 200) {
+                val it = confirmedAsrEvents.iterator()
+                if (it.hasNext()) {
+                    it.next()
+                    it.remove()
+                }
+            }
+        }
+        val event = AsrUtteranceEvent.Final(trimmed, utteranceId = utteranceId)
+        if (!_utteranceFlow.tryEmit(event)) {
+            scope.launch { _utteranceFlow.emit(event) }
+        }
+        if (!_recognizedTextFlow.tryEmit(trimmed)) {
             scope.launch {
-                _recognizedTextFlow.emit(clause)
+                _recognizedTextFlow.emit(trimmed)
             }
         }
     }
@@ -330,12 +430,23 @@ class SpeechRecognizerEngine(
      * Forces flushing the current partial text as an endpoint sentence.
      */
     fun flushCurrentSegment() {
-        val current = _partialTextFlow.value.trim()
-        if (current.isNotEmpty()) {
-            emitSentence(current)
-            _partialTextFlow.value = ""
-            lastEmittedText = ""
-            streamEmittedLength = 0
+        synchronized(recognizerLock) {
+            val recognizer = onlineRecognizer
+            val stream = onlineStream
+            val current = _partialTextFlow.value.trim()
+            if (current.isNotEmpty()) {
+                val epochId = currentUtteranceId
+                emitFinalUtterance(current, epochId)
+                _partialTextFlow.value = ""
+                lastEmittedText = ""
+                streamEmittedLength = 0
+                if (recognizer != null && stream != null) {
+                    try {
+                        recognizer.reset(stream)
+                    } catch (_: Exception) {}
+                }
+                currentUtteranceId = utteranceEpochCounter.incrementAndGet()
+            }
         }
         synchronized(pcmChunkAccumulator) {
             pcmChunkAccumulator.clear()

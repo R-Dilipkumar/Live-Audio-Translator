@@ -7,10 +7,13 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import android.util.Log
 import com.example.asr.AsrModelConfig
+import com.example.asr.DownloadState
 import com.example.asr.ModelDownloadState
 import com.example.asr.ModelManager
 import com.example.asr.SpeechRecognizerEngine
+import com.example.asr.SpeechValidator
 import com.example.data.AppDatabase
 import com.example.data.TranscriptEntity
 import com.example.overlay.FloatingSubtitleService
@@ -23,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -45,8 +49,27 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
 
     // ASR model state
     val asrDownloadState: StateFlow<ModelDownloadState> = modelManager.downloadState
+    val sherpaDownloadState: StateFlow<DownloadState> = modelManager.sherpaDownloadState
     val selectedAsrModel: StateFlow<AsrModelConfig> = modelManager.selectedModel
     val availableAsrModels: List<AsrModelConfig> = modelManager.availableModels
+
+    fun isSherpaModelReady(): Boolean = modelManager.areSherpaFilesPresent()
+
+    fun downloadSherpaModel(remoteUrl: String = ModelManager.DEFAULT_SHERPA_DOWNLOAD_URL) {
+        viewModelScope.launch {
+            modelManager.downloadSherpaModel(remoteUrl)
+        }
+    }
+
+    fun initializeSpeechRecognizer() {
+        if (!isSherpaModelReady()) {
+            Log.w("AudioTranslatorViewModel", "Cannot initialize speech recognizer: model files missing or incomplete (< 1MB)")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            speechEngine.initEngine()
+        }
+    }
 
     // Translation engine state
     val sourceLanguage: StateFlow<SupportedLanguage> = translatorEngine.sourceLanguage
@@ -57,6 +80,7 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     val downloadedLanguages: StateFlow<Set<String>> = translatorEngine.downloadedLanguages
     val downloadingPacks: StateFlow<Map<String, Int>> = translatorEngine.downloadingPacks
     val lastDetectedLanguage: StateFlow<String?> = translatorEngine.lastDetectedLanguage
+    val isTranslationModelMissing: StateFlow<Boolean> = translatorEngine.isModelMissing
 
     // Offloaded storage and readiness state flows (prevent Choreographer frame drops)
     val availableStorageMb: StateFlow<Long> = modelManager.availableStorageMb
@@ -97,11 +121,11 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         downloadTranslationModels()
     }
 
-    // Live display
-    private val _currentOriginalSpeech = MutableStateFlow("Waiting for audio...")
+    // Live display (starts clean and empty, avoiding synthetic status items in the live feed)
+    private val _currentOriginalSpeech = MutableStateFlow("")
     val currentOriginalSpeech: StateFlow<String> = _currentOriginalSpeech.asStateFlow()
 
-    private val _currentTranslatedSpeech = MutableStateFlow("Translation will appear here...")
+    private val _currentTranslatedSpeech = MutableStateFlow("")
     val currentTranslatedSpeech: StateFlow<String> = _currentTranslatedSpeech.asStateFlow()
 
     val livePartialSpeech: StateFlow<String> = speechEngine.partialTextFlow
@@ -121,41 +145,68 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
-    // Persisted transcript history from Room
+    // Persisted transcript history from Room (strictly validated to prevent non-speech status items)
     val transcriptHistory: StateFlow<List<TranscriptEntity>> = transcriptDao.getAllTranscripts()
+        .map { list ->
+            list.filter { item ->
+                SpeechValidator.isGenuineSpeech(item.originalText) &&
+                SpeechValidator.isGenuineSpeech(item.translatedText)
+            }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
         // Hydrate latest translation if service has already processed speech before ViewModel creation
         translatorEngine.latestTranslation.value?.let { initial ->
-            if (initial.originalText.isNotBlank()) {
+            if (SpeechValidator.isGenuineSpeech(initial.originalText) && speechEngine.isConfirmedAsrEvent(initial.originalText)) {
                 _currentOriginalSpeech.value = initial.originalText
             }
-            if (initial.translatedText.isNotBlank()) {
+            if (SpeechValidator.isGenuineSpeech(initial.translatedText)) {
                 _currentTranslatedSpeech.value = initial.translatedText
             }
         }
 
         // Collect recognized speech from ASR engine and feed to translator if capture service is not active
         viewModelScope.launch {
-            speechEngine.recognizedTextFlow.collect { text ->
-                if (text.isNotBlank()) {
-                    _currentOriginalSpeech.value = text
-                    if (!isCapturing.value) {
-                        translatorEngine.translateText(text)
+            var lastPartialDispatchTime = 0L
+            val partialDebounceMs = 480L
+
+            speechEngine.utteranceFlow.collect { event ->
+                when (event) {
+                    is com.example.asr.AsrUtteranceEvent.Partial -> {
+                        if (SpeechValidator.isGenuineSpeech(event.text)) {
+                            _currentOriginalSpeech.value = event.text
+                            if (!isCapturing.value) {
+                                val now = System.currentTimeMillis()
+                                if (now - lastPartialDispatchTime >= partialDebounceMs) {
+                                    lastPartialDispatchTime = now
+                                    translatorEngine.translateText(event.text, isFinal = false, utteranceId = event.utteranceId)
+                                }
+                            }
+                        }
+                    }
+                    is com.example.asr.AsrUtteranceEvent.Final -> {
+                        if (SpeechValidator.isGenuineSpeech(event.text) && speechEngine.isConfirmedAsrEvent(event.text)) {
+                            _currentOriginalSpeech.value = event.text
+                            if (!isCapturing.value) {
+                                translatorEngine.translateText(event.text, isFinal = true, utteranceId = event.utteranceId)
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Collect completed translations for live UI display only.
-        // BUG 1 FIX: Room persistence is handled exclusively by AudioCaptureService.translationPersistJob.
-        // Having both the service AND the ViewModel insert into Room caused duplicate transcript rows
-        // every time a translation was emitted while the service was running.
+        // Collect completed translations for live UI display.
+        // Pure speech validation ensures status strings never pollute display states.
         viewModelScope.launch {
             translatorEngine.translationFlow.collect { result ->
-                _currentOriginalSpeech.value = result.originalText
-                _currentTranslatedSpeech.value = result.translatedText
+                if (SpeechValidator.isGenuineSpeech(result.originalText)) {
+                    _currentOriginalSpeech.value = result.originalText
+                    if (SpeechValidator.isGenuineSpeech(result.translatedText)) {
+                        _currentTranslatedSpeech.value = result.translatedText
+                    }
+                }
             }
         }
 
@@ -196,6 +247,7 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
                 val updatedFloating = currentFloating.copy(
                     fontSizeSp = settings.fontSizeSp,
                     opacity = settings.overlayOpacity,
+                    maxSubtitleLines = settings.maxDisplayLines,
                     maxLines = settings.maxDisplayLines,
                     showOriginal = settings.showOriginalSpeech,
                     lingerTimeSeconds = settings.subtitleLingerTimeSeconds
@@ -277,6 +329,18 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
+    fun downloadModelPairExplicitly(srcCode: String, tgtCode: String) {
+        val availableMb = modelManager.getAvailableStorageMb()
+        if (availableMb < 150L) {
+            val error = "Insufficient storage: At least 150MB of free space is required to download offline translation packs (Available: ${availableMb}MB)."
+            showError(error)
+            return
+        }
+        viewModelScope.launch {
+            translatorEngine.downloadModelPairExplicitly(srcCode, tgtCode)
+        }
+    }
+
     fun setSourceLanguage(lang: SupportedLanguage) {
         translatorEngine.setSourceLanguage(lang)
     }
@@ -302,8 +366,29 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun clearCurrentDisplay() {
-        _currentOriginalSpeech.value = "Waiting for audio..."
-        _currentTranslatedSpeech.value = "Translation will appear here..."
+        _currentOriginalSpeech.value = ""
+        _currentTranslatedSpeech.value = ""
+        translatorEngine.clearRecentTranslations()
+    }
+
+    /**
+     * Strictly validates speech content and origin before saving to Room database.
+     */
+    fun saveTranscriptIfValid(entity: TranscriptEntity) {
+        if (SpeechValidator.isGenuineSpeech(entity.originalText) &&
+            SpeechValidator.isGenuineSpeech(entity.translatedText) &&
+            speechEngine.isConfirmedAsrEvent(entity.originalText)
+        ) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    transcriptDao.insert(entity)
+                } catch (e: Exception) {
+                    Log.w("AudioTranslatorVM", "Failed inserting transcript: ${e.message}")
+                }
+            }
+        } else {
+            Log.d("AudioTranslatorVM", "Suppressed non-speech transcript from manual save: ${entity.originalText}")
+        }
     }
 
     fun startFloatingOverlay() {

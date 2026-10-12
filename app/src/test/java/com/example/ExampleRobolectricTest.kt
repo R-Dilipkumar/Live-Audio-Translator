@@ -55,5 +55,18 @@ class ExampleRobolectricTest {
             (state as com.example.asr.RecognizerState.Error).message
         )
     }
+
+    @Test
+    fun `verify speech recognizer initial state is NotReady before initialization`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val modelManager = com.example.asr.ModelManager(context)
+        val speechEngine = com.example.asr.SpeechRecognizerEngine(context, modelManager)
+
+        val state = speechEngine.engineState.value
+        org.junit.Assert.assertTrue(
+            "Speech engine must initialize in NotReady state on boot",
+            state is com.example.asr.RecognizerState.NotReady
+        )
+    }
 }
 

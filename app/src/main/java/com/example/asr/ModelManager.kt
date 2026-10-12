@@ -72,6 +72,19 @@ sealed class ModelDownloadState {
     data class Error(val errorMsg: String) : ModelDownloadState()
 }
 
+sealed class DownloadState {
+    object Idle : DownloadState()
+    data class Downloading(
+        val progress: Float,
+        val speedBytesPerSec: Long = 0L,
+        val bytesDownloaded: Long = 0L,
+        val totalBytes: Long = 0L
+    ) : DownloadState()
+    object Extracting : DownloadState()
+    object Ready : DownloadState()
+    data class Error(val message: String) : DownloadState()
+}
+
 class ModelManager(private val context: Context) {
 
     private val TAG = "ModelManager"
@@ -189,11 +202,22 @@ class ModelManager(private val context: Context) {
         )
     )
 
+    companion object {
+        const val DEFAULT_SHERPA_DOWNLOAD_URL = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2"
+    }
+
     private val _selectedModel = MutableStateFlow<AsrModelConfig>(availableModels[0])
     val selectedModel: StateFlow<AsrModelConfig> = _selectedModel.asStateFlow()
 
     private val _downloadState = MutableStateFlow<ModelDownloadState>(ModelDownloadState.NotDownloaded)
     val downloadState: StateFlow<ModelDownloadState> = _downloadState.asStateFlow()
+
+    private val _sherpaDownloadState = MutableStateFlow<DownloadState>(
+        if (areSherpaFilesPresent()) DownloadState.Ready else DownloadState.Idle
+    )
+    val sherpaDownloadState: StateFlow<DownloadState> = _sherpaDownloadState.asStateFlow()
+
+    val downloadStateFlow: StateFlow<DownloadState> get() = sherpaDownloadState
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -210,6 +234,7 @@ class ModelManager(private val context: Context) {
             cleanupOrphanedTempFiles()
             refreshAvailableStorage()
             refreshReadyModels()
+            checkSherpaModelStatus()
             hasInitialScanCompleted = true
         }
     }
@@ -257,6 +282,15 @@ class ModelManager(private val context: Context) {
                     file.delete()
                 }
             }
+            // Purge incomplete stub onnx files (< 1MB) that would trigger native JNI SIGABRT
+            val sherpaDir = File(context.filesDir, "models/sherpa-onnx")
+            if (sherpaDir.exists() && !areSherpaFilesPresent()) {
+                sherpaDir.listFiles()?.forEach { file ->
+                    if (file.isFile && file.name.endsWith(".onnx") && file.length() < 1_000_000L) {
+                        file.delete()
+                    }
+                }
+            }
         } catch (_: Exception) {}
     }
 
@@ -286,6 +320,55 @@ class ModelManager(private val context: Context) {
 
     fun getModelDirectory(model: AsrModelConfig): File {
         return File(getModelsDirectory(), model.id)
+    }
+
+    fun getSherpaModelDirectory(): File {
+        val dir = File(context.filesDir, "models/sherpa-onnx")
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        return dir
+    }
+
+    /**
+     * Checks if the required files (encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt)
+     * exist in context.filesDir/models/sherpa-onnx/
+     */
+    fun areSherpaFilesPresent(): Boolean {
+        val dir = File(context.filesDir, "models/sherpa-onnx")
+        if (!dir.exists() || !dir.isDirectory) return false
+
+        val minOnnxSize = 1_000_000L // 1 MB non-empty validation
+        val encoder = File(dir, "encoder.int8.onnx")
+        val decoder = File(dir, "decoder.int8.onnx")
+        val joiner = File(dir, "joiner.int8.onnx")
+        val tokens = File(dir, "tokens.txt")
+
+        if (encoder.exists() && encoder.length() > minOnnxSize &&
+            decoder.exists() && decoder.length() > minOnnxSize &&
+            joiner.exists() && joiner.length() > minOnnxSize &&
+            tokens.exists() && tokens.length() > 10L
+        ) {
+            return true
+        }
+
+        val enc = findFileInDir(dir, "encoder.int8.onnx") ?: findFileByKeyword(dir, "encoder")
+        val dec = findFileInDir(dir, "decoder.int8.onnx") ?: findFileByKeyword(dir, "decoder")
+        val joi = findFileInDir(dir, "joiner.int8.onnx") ?: findFileByKeyword(dir, "joiner")
+        val tok = findFileInDir(dir, "tokens.txt") ?: findFileByKeyword(dir, "tokens")
+
+        return enc != null && enc.length() > minOnnxSize &&
+                dec != null && dec.length() > minOnnxSize &&
+                joi != null && joi.length() > minOnnxSize &&
+                tok != null && tok.length() > 10L
+    }
+
+    fun checkSherpaModelStatus() {
+        if (areSherpaFilesPresent()) {
+            _sherpaDownloadState.value = DownloadState.Ready
+        } else if (_sherpaDownloadState.value is DownloadState.Ready) {
+            _sherpaDownloadState.value = DownloadState.Idle
+        }
     }
 
     /**
@@ -339,9 +422,9 @@ class ModelManager(private val context: Context) {
             val joiner = findFileInDir(dir, model.joinerFilename) ?: findFileByKeyword(dir, "joiner")
             val tokens = findFileInDir(dir, model.tokensFilename) ?: findFileByKeyword(dir, "tokens.txt")
 
-            if (encoder != null && encoder.length() > 1000L &&
-                decoder != null && decoder.length() > 1000L &&
-                joiner != null && joiner.length() > 1000L &&
+            if (encoder != null && encoder.length() > 1_000_000L &&
+                decoder != null && decoder.length() > 1_000_000L &&
+                joiner != null && joiner.length() > 1_000_000L &&
                 tokens != null && tokens.length() > 10L
             ) {
                 return ResolvedModelFiles(model, encoder, decoder, joiner, tokens)
@@ -355,6 +438,23 @@ class ModelManager(private val context: Context) {
      * model directories, subdirectories, and app internal storage.
      */
     fun resolveModelFiles(preferredModel: AsrModelConfig = _selectedModel.value): ResolvedModelFiles? {
+        // 0. Primary path: check context.filesDir/models/sherpa-onnx (> 1MB validation)
+        val sherpaDir = File(context.filesDir, "models/sherpa-onnx")
+        if (sherpaDir.exists() && sherpaDir.isDirectory) {
+            val enc = File(sherpaDir, "encoder.int8.onnx").let { if (it.exists() && it.length() > 1_000_000L) it else findFileByKeyword(sherpaDir, "encoder") }
+            val dec = File(sherpaDir, "decoder.int8.onnx").let { if (it.exists() && it.length() > 1_000_000L) it else findFileByKeyword(sherpaDir, "decoder") }
+            val joi = File(sherpaDir, "joiner.int8.onnx").let { if (it.exists() && it.length() > 1_000_000L) it else findFileByKeyword(sherpaDir, "joiner") }
+            val tok = File(sherpaDir, "tokens.txt").let { if (it.exists() && it.length() > 10L) it else findFileByKeyword(sherpaDir, "tokens") }
+
+            if (enc != null && enc.length() > 1_000_000L &&
+                dec != null && dec.length() > 1_000_000L &&
+                joi != null && joi.length() > 1_000_000L &&
+                tok != null && tok.length() > 10L
+            ) {
+                return ResolvedModelFiles(preferredModel, enc, dec, joi, tok)
+            }
+        }
+
         // 1. Check preferred model directory first
         resolveFilesForModel(preferredModel)?.let { return it }
 
@@ -385,9 +485,9 @@ class ModelManager(private val context: Context) {
         val joiner = findFileByKeyword(rootDir, "joiner")
         val tokens = findFileByKeyword(rootDir, "tokens")
 
-        if (encoder != null && encoder.length() > 1000L &&
-            decoder != null && decoder.length() > 1000L &&
-            joiner != null && joiner.length() > 1000L &&
+        if (encoder != null && encoder.length() > 1_000_000L &&
+            decoder != null && decoder.length() > 1_000_000L &&
+            joiner != null && joiner.length() > 1_000_000L &&
             tokens != null && tokens.length() > 10L
         ) {
             // Find which model best matches by filename, or fallback to preferred
@@ -527,6 +627,155 @@ class ModelManager(private val context: Context) {
             val error = e.localizedMessage ?: "Unknown model download error"
             _downloadState.value = ModelDownloadState.Error(error)
             NotificationHelper.showErrorNotification(context, "ASR Model Download Error", error)
+        } finally {
+            if (tempArchiveFile.exists()) {
+                tempArchiveFile.delete()
+            }
+        }
+    }
+
+    /**
+     * Downloads and sets up the offline Sherpa-ONNX streaming model for the First-Launch flow.
+     * Extracts files into context.filesDir/models/sherpa-onnx/ using streaming decompression.
+     */
+    suspend fun downloadSherpaModel(
+        remoteUrl: String = DEFAULT_SHERPA_DOWNLOAD_URL
+    ) = withContext(Dispatchers.IO) {
+        if (areSherpaFilesPresent()) {
+            _sherpaDownloadState.value = DownloadState.Ready
+            return@withContext
+        }
+
+        val targetDir = getSherpaModelDirectory()
+        val tempArchiveFile = File(getModelsDirectory(), "sherpa_onnx_download_temp.archive")
+
+        try {
+            val availableMb = refreshAvailableStorage()
+            if (availableMb < 100L) {
+                val error = "Insufficient storage: At least 100MB of free space is required (Available: ${availableMb}MB)."
+                _sherpaDownloadState.value = DownloadState.Error(error)
+                return@withContext
+            }
+
+            _sherpaDownloadState.value = DownloadState.Downloading(
+                progress = 0f,
+                speedBytesPerSec = 0L,
+                bytesDownloaded = 0L,
+                totalBytes = 44_200_000L
+            )
+
+            val request = Request.Builder()
+                .url(remoteUrl)
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val error = "Download failed with HTTP ${response.code}: ${response.message}"
+                    if (tempArchiveFile.exists()) tempArchiveFile.delete()
+                    _sherpaDownloadState.value = DownloadState.Error(error)
+                    return@withContext
+                }
+
+                val body = response.body ?: throw IOException("Empty response body")
+                val contentLength = if (body.contentLength() > 0) body.contentLength() else 44_200_000L
+
+                body.byteStream().use { input ->
+                    FileOutputStream(tempArchiveFile).use { output ->
+                        val buffer = ByteArray(32 * 1024)
+                        var bytesRead: Int
+                        var totalRead = 0L
+                        var lastSpeedTime = System.currentTimeMillis()
+                        var lastSpeedBytes = 0L
+                        var currentSpeed = 0L
+
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+
+                            val now = System.currentTimeMillis()
+                            val timeDelta = now - lastSpeedTime
+                            if (timeDelta >= 350) {
+                                val bytesDelta = totalRead - lastSpeedBytes
+                                currentSpeed = (bytesDelta * 1000L) / timeDelta
+                                lastSpeedTime = now
+                                lastSpeedBytes = totalRead
+                            }
+
+                            val progress = if (contentLength > 0) (totalRead.toFloat() / contentLength.toFloat()).coerceIn(0f, 1f) else 0f
+                            _sherpaDownloadState.value = DownloadState.Downloading(
+                                progress = progress,
+                                speedBytesPerSec = currentSpeed,
+                                bytesDownloaded = totalRead,
+                                totalBytes = contentLength
+                            )
+                        }
+                        output.flush()
+                    }
+                }
+            }
+
+            _sherpaDownloadState.value = DownloadState.Extracting
+            if (targetDir.exists()) {
+                targetDir.deleteRecursively()
+            }
+            targetDir.mkdirs()
+
+            val isZip = isZipFile(tempArchiveFile)
+            val isBz2 = isBzip2File(tempArchiveFile) || remoteUrl.endsWith(".tar.bz2") || remoteUrl.endsWith(".bz2")
+            if (isZip) {
+                unzip(tempArchiveFile, targetDir)
+            } else if (isBz2) {
+                extractTarBz2(tempArchiveFile, targetDir)
+            } else {
+                tempArchiveFile.copyTo(File(targetDir, "encoder.int8.onnx"), overwrite = true)
+            }
+
+            if (tempArchiveFile.exists()) {
+                tempArchiveFile.delete()
+            }
+
+            // Standardize file names in targetDir so encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt are directly present
+            val enc = findFileInDir(targetDir, "encoder.int8.onnx") ?: findFileByKeyword(targetDir, "encoder")
+            val dec = findFileInDir(targetDir, "decoder.int8.onnx") ?: findFileByKeyword(targetDir, "decoder")
+            val joi = findFileInDir(targetDir, "joiner.int8.onnx") ?: findFileByKeyword(targetDir, "joiner")
+            val tok = findFileInDir(targetDir, "tokens.txt") ?: findFileByKeyword(targetDir, "tokens")
+
+            if (enc != null && enc.name != "encoder.int8.onnx") {
+                enc.copyTo(File(targetDir, "encoder.int8.onnx"), overwrite = true)
+            }
+            if (dec != null && dec.name != "decoder.int8.onnx") {
+                dec.copyTo(File(targetDir, "decoder.int8.onnx"), overwrite = true)
+            }
+            if (joi != null && joi.name != "joiner.int8.onnx") {
+                joi.copyTo(File(targetDir, "joiner.int8.onnx"), overwrite = true)
+            }
+            if (tok != null && tok.name != "tokens.txt") {
+                tok.copyTo(File(targetDir, "tokens.txt"), overwrite = true)
+            }
+
+            if (areSherpaFilesPresent()) {
+                _sherpaDownloadState.value = DownloadState.Ready
+                refreshReadyModels()
+                refreshAvailableStorage()
+                checkCurrentModelStatus()
+                Log.i(TAG, "Sherpa-ONNX model downloaded and extracted successfully in ${targetDir.absolutePath}")
+            } else {
+                val error = "Model archive extracted, but required files (encoder/decoder/joiner/tokens) were not found."
+                Log.e(TAG, error)
+                _sherpaDownloadState.value = DownloadState.Error(error)
+            }
+
+        } catch (e: CancellationException) {
+            if (tempArchiveFile.exists()) tempArchiveFile.delete()
+            if (targetDir.exists() && !areSherpaFilesPresent()) targetDir.deleteRecursively()
+            _sherpaDownloadState.value = DownloadState.Idle
+            throw e
+        } catch (e: Exception) {
+            if (tempArchiveFile.exists()) tempArchiveFile.delete()
+            if (targetDir.exists() && !areSherpaFilesPresent()) targetDir.deleteRecursively()
+            val error = e.localizedMessage ?: "Failed to download model"
+            Log.e(TAG, "Failed downloading Sherpa model: $error", e)
+            _sherpaDownloadState.value = DownloadState.Error(error)
         } finally {
             if (tempArchiveFile.exists()) {
                 tempArchiveFile.delete()
