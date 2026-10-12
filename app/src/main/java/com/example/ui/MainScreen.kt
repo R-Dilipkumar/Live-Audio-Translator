@@ -126,6 +126,8 @@ fun MainScreen(
     LaunchedEffect(Unit) {
         if (!viewModel.isSherpaModelReady()) {
             viewModel.downloadSherpaModel()
+        } else {
+            viewModel.initializeSpeechRecognizer()
         }
     }
 

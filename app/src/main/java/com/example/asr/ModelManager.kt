@@ -185,7 +185,7 @@ class ModelManager(private val context: Context) {
         // ==========================================
         AsrModelConfig(
             id = "zipformer_bilingual_zh_en",
-            name = "Chinese & English Bilingual Cinematic Zipformer",
+            name = "Chinese & English Bilingual Streaming Zipformer",
             languageCode = "zh",
             description = "High-accuracy dual-language recognizer for code-switching and bilingual dialogue (approx. 115 MB)",
             downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2",
@@ -195,10 +195,73 @@ class ModelManager(private val context: Context) {
             joinerFilename = "joiner-epoch-99-avg-1.int8.onnx",
             tokensFilename = "tokens.txt",
             isMultilingual = false,
-            category = "Chinese",
+            category = "Bilingual (ZH/EN)",
             tier = ModelTier.CINEMATIC,
             latencyProfile = "🎯 ~200ms",
             ramProfile = "💾 ~95MB RAM"
+        ),
+
+        // ==========================================
+        // 6. FRENCH FAST
+        // ==========================================
+        AsrModelConfig(
+            id = "zipformer_fr",
+            name = "French Streaming Zipformer",
+            languageCode = "fr",
+            description = "Real-time French streaming speech recognition with low latency (approx. 95 MB)",
+            downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-fr-2023-04-14.tar.bz2",
+            totalSizeBytes = 95_000_000L,
+            encoderFilename = "encoder-epoch-29-avg-9-with-head-epoch-29.int8.onnx",
+            decoderFilename = "decoder-epoch-29-avg-9-with-head-epoch-29.onnx",
+            joinerFilename = "joiner-epoch-29-avg-9-with-head-epoch-29.int8.onnx",
+            tokensFilename = "tokens.txt",
+            isMultilingual = false,
+            category = "French",
+            tier = ModelTier.FAST,
+            latencyProfile = "⚡ ~110ms",
+            ramProfile = "💾 ~55MB RAM"
+        ),
+
+        // ==========================================
+        // 7. KOREAN FAST
+        // ==========================================
+        AsrModelConfig(
+            id = "zipformer_ko",
+            name = "Korean Streaming Zipformer",
+            languageCode = "ko",
+            description = "Real-time Korean streaming speech recognition for K-dramas, gaming, and media (approx. 85 MB)",
+            downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2",
+            totalSizeBytes = 85_000_000L,
+            encoderFilename = "encoder-epoch-99-avg-1.int8.onnx",
+            decoderFilename = "decoder-epoch-99-avg-1.onnx",
+            joinerFilename = "joiner-epoch-99-avg-1.int8.onnx",
+            tokensFilename = "tokens.txt",
+            isMultilingual = false,
+            category = "Korean",
+            tier = ModelTier.FAST,
+            latencyProfile = "⚡ ~105ms",
+            ramProfile = "💾 ~50MB RAM"
+        ),
+
+        // ==========================================
+        // 8. BENGALI FAST
+        // ==========================================
+        AsrModelConfig(
+            id = "zipformer_bn",
+            name = "Bengali Streaming Zipformer",
+            languageCode = "bn",
+            description = "Real-time Bengali streaming speech recognition based on Vosk data (approx. 80 MB)",
+            downloadUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09.tar.bz2",
+            totalSizeBytes = 80_000_000L,
+            encoderFilename = "encoder-epoch-99-avg-1.int8.onnx",
+            decoderFilename = "decoder-epoch-99-avg-1.onnx",
+            joinerFilename = "joiner-epoch-99-avg-1.int8.onnx",
+            tokensFilename = "tokens.txt",
+            isMultilingual = false,
+            category = "Bengali",
+            tier = ModelTier.FAST,
+            latencyProfile = "⚡ ~100ms",
+            ramProfile = "💾 ~45MB RAM"
         )
     )
 
@@ -282,11 +345,11 @@ class ModelManager(private val context: Context) {
                     file.delete()
                 }
             }
-            // Purge incomplete stub onnx files (< 1MB) that would trigger native JNI SIGABRT
+            // Purge incomplete stub onnx files (< 50KB) that would trigger native JNI SIGABRT
             val sherpaDir = File(context.filesDir, "models/sherpa-onnx")
             if (sherpaDir.exists() && !areSherpaFilesPresent()) {
                 sherpaDir.listFiles()?.forEach { file ->
-                    if (file.isFile && file.name.endsWith(".onnx") && file.length() < 1_000_000L) {
+                    if (file.isFile && file.name.endsWith(".onnx") && file.length() < 50_000L) {
                         file.delete()
                     }
                 }
@@ -331,36 +394,112 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Checks if the required files (encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt)
-     * exist in context.filesDir/models/sherpa-onnx/
+     * Traverses all subdirectories under targetDir (context.filesDir/models/sherpa-onnx/),
+     * locates the 4 core model files (encoder, decoder, joiner, tokens),
+     * moves them directly into root targetDir with normalized names:
+     * - encoder.int8.onnx
+     * - decoder.int8.onnx
+     * - joiner.int8.onnx
+     * - tokens.txt
+     * and deletes leftover empty or nested subfolders.
+     */
+    fun flattenSherpaModelDirectory(baseDir: File = getSherpaModelDirectory()): Boolean {
+        if (!baseDir.exists()) return false
+
+        val allFiles = baseDir.walkTopDown().filter { it.isFile }.toList()
+
+        val encoder = allFiles.firstOrNull { it.name.contains("encoder", ignoreCase = true) && it.name.endsWith(".onnx") }
+        val decoder = allFiles.firstOrNull { it.name.contains("decoder", ignoreCase = true) && it.name.endsWith(".onnx") }
+        val joiner = allFiles.firstOrNull { it.name.contains("joiner", ignoreCase = true) && it.name.endsWith(".onnx") }
+        val tokens = allFiles.firstOrNull { it.name.contains("tokens", ignoreCase = true) && it.name.endsWith(".txt") }
+
+        if (encoder == null || decoder == null || joiner == null || tokens == null) {
+            return false
+        }
+
+        val destEncoder = File(baseDir, "encoder.int8.onnx")
+        val destDecoder = File(baseDir, "decoder.int8.onnx")
+        val destJoiner = File(baseDir, "joiner.int8.onnx")
+        val destTokens = File(baseDir, "tokens.txt")
+
+        if (encoder.canonicalPath != destEncoder.canonicalPath) {
+            val moved = encoder.renameTo(destEncoder)
+            if (!moved) {
+                encoder.copyTo(destEncoder, overwrite = true)
+                encoder.delete()
+            }
+        }
+        if (decoder.canonicalPath != destDecoder.canonicalPath) {
+            val moved = decoder.renameTo(destDecoder)
+            if (!moved) {
+                decoder.copyTo(destDecoder, overwrite = true)
+                decoder.delete()
+            }
+        }
+        if (joiner.canonicalPath != destJoiner.canonicalPath) {
+            val moved = joiner.renameTo(destJoiner)
+            if (!moved) {
+                joiner.copyTo(destJoiner, overwrite = true)
+                joiner.delete()
+            }
+        }
+        if (tokens.canonicalPath != destTokens.canonicalPath) {
+            val moved = tokens.renameTo(destTokens)
+            if (!moved) {
+                tokens.copyTo(destTokens, overwrite = true)
+                tokens.delete()
+            }
+        }
+
+        // Clean up nested directories leaving only the flat models
+        baseDir.listFiles()?.filter { it.isDirectory }?.forEach { it.deleteRecursively() }
+
+        return areSherpaFilesPresent()
+    }
+
+    /**
+     * Checks if the required normalized files (encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt)
+     * exist directly in context.filesDir/models/sherpa-onnx/.
+     * Validates that encoder > 5MB, decoder > 500KB, joiner > 50KB, tokens > 50 bytes.
      */
     fun areSherpaFilesPresent(): Boolean {
-        val dir = File(context.filesDir, "models/sherpa-onnx")
-        if (!dir.exists() || !dir.isDirectory) return false
+        val modelDir = File(context.filesDir, "models/sherpa-onnx")
+        if (!modelDir.exists() || !modelDir.isDirectory) return false
 
-        val minOnnxSize = 1_000_000L // 1 MB non-empty validation
-        val encoder = File(dir, "encoder.int8.onnx")
-        val decoder = File(dir, "decoder.int8.onnx")
-        val joiner = File(dir, "joiner.int8.onnx")
-        val tokens = File(dir, "tokens.txt")
+        val encoder = File(modelDir, "encoder.int8.onnx")
+        val decoder = File(modelDir, "decoder.int8.onnx")
+        val joiner = File(modelDir, "joiner.int8.onnx")
+        val tokens = File(modelDir, "tokens.txt")
 
-        if (encoder.exists() && encoder.length() > minOnnxSize &&
-            decoder.exists() && decoder.length() > minOnnxSize &&
-            joiner.exists() && joiner.length() > minOnnxSize &&
-            tokens.exists() && tokens.length() > 10L
-        ) {
+        val encoderValid = encoder.exists() && encoder.length() > 5_000_000L // > 5 MB
+        val decoderValid = decoder.exists() && decoder.length() > 500_000L   // > 500 KB
+        val joinerValid = joiner.exists() && joiner.length() > 50_000L       // > 50 KB (joiner is ~260 KB!)
+        val tokensValid = tokens.exists() && tokens.length() > 50L          // > 50 bytes
+
+        if (encoderValid && decoderValid && joinerValid && tokensValid) {
             return true
         }
 
-        val enc = findFileInDir(dir, "encoder.int8.onnx") ?: findFileByKeyword(dir, "encoder")
-        val dec = findFileInDir(dir, "decoder.int8.onnx") ?: findFileByKeyword(dir, "decoder")
-        val joi = findFileInDir(dir, "joiner.int8.onnx") ?: findFileByKeyword(dir, "joiner")
-        val tok = findFileInDir(dir, "tokens.txt") ?: findFileByKeyword(dir, "tokens")
+        // If unflattened nested files exist, attempt a flattening pass
+        val hasNestedFiles = modelDir.walkTopDown().any { file ->
+            file.isFile && file.parentFile != modelDir && (file.name.endsWith(".onnx", ignoreCase = true) || file.name.endsWith(".txt", ignoreCase = true))
+        }
+        if (hasNestedFiles) {
+            val allFiles = modelDir.walkTopDown().filter { it.isFile }.toList()
+            val enc = allFiles.firstOrNull { it.name.contains("encoder", ignoreCase = true) && it.name.endsWith(".onnx") }
+            val dec = allFiles.firstOrNull { it.name.contains("decoder", ignoreCase = true) && it.name.endsWith(".onnx") }
+            val joi = allFiles.firstOrNull { it.name.contains("joiner", ignoreCase = true) && it.name.endsWith(".onnx") }
+            val tok = allFiles.firstOrNull { it.name.contains("tokens", ignoreCase = true) && it.name.endsWith(".txt") }
+            if (enc != null && dec != null && joi != null && tok != null) {
+                flattenSherpaModelDirectory(modelDir)
+                return encoder.exists() && encoder.length() > 5_000_000L &&
+                        decoder.exists() && decoder.length() > 500_000L &&
+                        joiner.exists() && joiner.length() > 50_000L &&
+                        tokens.exists() && tokens.length() > 50L
+            }
+        }
 
-        return enc != null && enc.length() > minOnnxSize &&
-                dec != null && dec.length() > minOnnxSize &&
-                joi != null && joi.length() > minOnnxSize &&
-                tok != null && tok.length() > 10L
+        return false
     }
 
     fun checkSherpaModelStatus() {
@@ -422,10 +561,10 @@ class ModelManager(private val context: Context) {
             val joiner = findFileInDir(dir, model.joinerFilename) ?: findFileByKeyword(dir, "joiner")
             val tokens = findFileInDir(dir, model.tokensFilename) ?: findFileByKeyword(dir, "tokens.txt")
 
-            if (encoder != null && encoder.length() > 1_000_000L &&
-                decoder != null && decoder.length() > 1_000_000L &&
-                joiner != null && joiner.length() > 1_000_000L &&
-                tokens != null && tokens.length() > 10L
+            if (encoder != null && encoder.length() > 5_000_000L &&
+                decoder != null && decoder.length() > 500_000L &&
+                joiner != null && joiner.length() > 50_000L &&
+                tokens != null && tokens.length() > 50L
             ) {
                 return ResolvedModelFiles(model, encoder, decoder, joiner, tokens)
             }
@@ -438,18 +577,18 @@ class ModelManager(private val context: Context) {
      * model directories, subdirectories, and app internal storage.
      */
     fun resolveModelFiles(preferredModel: AsrModelConfig = _selectedModel.value): ResolvedModelFiles? {
-        // 0. Primary path: check context.filesDir/models/sherpa-onnx (> 1MB validation)
+        // 0. Primary path: check context.filesDir/models/sherpa-onnx
         val sherpaDir = File(context.filesDir, "models/sherpa-onnx")
         if (sherpaDir.exists() && sherpaDir.isDirectory) {
-            val enc = File(sherpaDir, "encoder.int8.onnx").let { if (it.exists() && it.length() > 1_000_000L) it else findFileByKeyword(sherpaDir, "encoder") }
-            val dec = File(sherpaDir, "decoder.int8.onnx").let { if (it.exists() && it.length() > 1_000_000L) it else findFileByKeyword(sherpaDir, "decoder") }
-            val joi = File(sherpaDir, "joiner.int8.onnx").let { if (it.exists() && it.length() > 1_000_000L) it else findFileByKeyword(sherpaDir, "joiner") }
-            val tok = File(sherpaDir, "tokens.txt").let { if (it.exists() && it.length() > 10L) it else findFileByKeyword(sherpaDir, "tokens") }
+            val enc = File(sherpaDir, "encoder.int8.onnx").let { if (it.exists() && it.length() > 5_000_000L) it else findFileByKeyword(sherpaDir, "encoder") }
+            val dec = File(sherpaDir, "decoder.int8.onnx").let { if (it.exists() && it.length() > 500_000L) it else findFileByKeyword(sherpaDir, "decoder") }
+            val joi = File(sherpaDir, "joiner.int8.onnx").let { if (it.exists() && it.length() > 50_000L) it else findFileByKeyword(sherpaDir, "joiner") }
+            val tok = File(sherpaDir, "tokens.txt").let { if (it.exists() && it.length() > 50L) it else findFileByKeyword(sherpaDir, "tokens") }
 
-            if (enc != null && enc.length() > 1_000_000L &&
-                dec != null && dec.length() > 1_000_000L &&
-                joi != null && joi.length() > 1_000_000L &&
-                tok != null && tok.length() > 10L
+            if (enc != null && enc.length() > 5_000_000L &&
+                dec != null && dec.length() > 500_000L &&
+                joi != null && joi.length() > 50_000L &&
+                tok != null && tok.length() > 50L
             ) {
                 return ResolvedModelFiles(preferredModel, enc, dec, joi, tok)
             }
@@ -485,10 +624,10 @@ class ModelManager(private val context: Context) {
         val joiner = findFileByKeyword(rootDir, "joiner")
         val tokens = findFileByKeyword(rootDir, "tokens")
 
-        if (encoder != null && encoder.length() > 1_000_000L &&
-            decoder != null && decoder.length() > 1_000_000L &&
-            joiner != null && joiner.length() > 1_000_000L &&
-            tokens != null && tokens.length() > 10L
+        if (encoder != null && encoder.length() > 5_000_000L &&
+            decoder != null && decoder.length() > 500_000L &&
+            joiner != null && joiner.length() > 50_000L &&
+            tokens != null && tokens.length() > 50L
         ) {
             // Find which model best matches by filename, or fallback to preferred
             val matchingModel = availableModels.firstOrNull { model ->
@@ -734,31 +873,19 @@ class ModelManager(private val context: Context) {
                 tempArchiveFile.delete()
             }
 
-            // Standardize file names in targetDir so encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt are directly present
-            val enc = findFileInDir(targetDir, "encoder.int8.onnx") ?: findFileByKeyword(targetDir, "encoder")
-            val dec = findFileInDir(targetDir, "decoder.int8.onnx") ?: findFileByKeyword(targetDir, "decoder")
-            val joi = findFileInDir(targetDir, "joiner.int8.onnx") ?: findFileByKeyword(targetDir, "joiner")
-            val tok = findFileInDir(targetDir, "tokens.txt") ?: findFileByKeyword(targetDir, "tokens")
-
-            if (enc != null && enc.name != "encoder.int8.onnx") {
-                enc.copyTo(File(targetDir, "encoder.int8.onnx"), overwrite = true)
-            }
-            if (dec != null && dec.name != "decoder.int8.onnx") {
-                dec.copyTo(File(targetDir, "decoder.int8.onnx"), overwrite = true)
-            }
-            if (joi != null && joi.name != "joiner.int8.onnx") {
-                joi.copyTo(File(targetDir, "joiner.int8.onnx"), overwrite = true)
-            }
-            if (tok != null && tok.name != "tokens.txt") {
-                tok.copyTo(File(targetDir, "tokens.txt"), overwrite = true)
-            }
+            // Recursive file discovery & directory flattening:
+            // Traverses all subdirectories under targetDir, finds encoder/decoder/joiner/tokens,
+            // moves them directly into root targetDir with normalized names:
+            // encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt,
+            // and deletes leftover empty nested subfolders.
+            flattenSherpaModelDirectory(targetDir)
 
             if (areSherpaFilesPresent()) {
                 _sherpaDownloadState.value = DownloadState.Ready
                 refreshReadyModels()
                 refreshAvailableStorage()
                 checkCurrentModelStatus()
-                Log.i(TAG, "Sherpa-ONNX model downloaded and extracted successfully in ${targetDir.absolutePath}")
+                Log.i(TAG, "Sherpa-ONNX model downloaded, flattened, and verified successfully in ${targetDir.absolutePath}")
             } else {
                 val error = "Model archive extracted, but required files (encoder/decoder/joiner/tokens) were not found."
                 Log.e(TAG, error)

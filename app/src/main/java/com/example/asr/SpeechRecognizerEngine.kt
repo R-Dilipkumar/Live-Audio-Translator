@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileOutputStream
 import kotlin.math.abs
 
 sealed class AsrUtteranceEvent {
@@ -250,8 +251,11 @@ class SpeechRecognizerEngine(
     }
 
     /**
-     * Resolves verified model files from internal app storage.
-     * Requires non-empty size validation (> 1MB per ONNX file, > 10 bytes for tokens)
+     * Resolves verified model files using Dual-Path loading:
+     * 1. Primary path: internal app storage (`context.filesDir/models/sherpa-onnx`).
+     * 2. Fallback path: Android assets only if present, copying to internal storage.
+     * 3. Fallback path: ModelManager resolution with strict > 1MB validation.
+     * Requires non-empty size validation (> 1MB per ONNX file, > 100 bytes for tokens)
      * to prevent native SIGABRT crashes caused by stub/truncated files.
      */
     private fun resolveVerifiedModelFiles(): LoadedModelFiles? {
@@ -260,13 +264,18 @@ class SpeechRecognizerEngine(
         // 1. Primary Path: Internal app storage models/sherpa-onnx
         resolveFromDirectory(sherpaDir, "sherpa-onnx-internal")?.let { return it }
 
-        // 2. Fallback: ModelManager resolution with strict > 1MB validation
+        // 2. Fallback: Android assets only if present
+        if (copyModelsFromAssetsIfPresent(sherpaDir)) {
+            resolveFromDirectory(sherpaDir, "sherpa-onnx-assets")?.let { return it }
+        }
+
+        // 3. Fallback: ModelManager resolution with strict validation
         val resolved = modelManager.resolveModelFiles(modelManager.selectedModel.value)
         if (resolved != null &&
-            resolved.encoderFile.length() > 1_000_000L &&
-            resolved.decoderFile.length() > 1_000_000L &&
-            resolved.joinerFile.length() > 1_000_000L &&
-            resolved.tokensFile.length() > 10L
+            resolved.encoderFile.length() > 5_000_000L &&
+            resolved.decoderFile.length() > 500_000L &&
+            resolved.joinerFile.length() > 50_000L &&
+            resolved.tokensFile.length() > 50L
         ) {
             return LoadedModelFiles(
                 modelId = resolved.model.id,
@@ -279,19 +288,60 @@ class SpeechRecognizerEngine(
         return null
     }
 
+    /**
+     * Copies Sherpa-ONNX model files from assets if present.
+     * Scans candidate subdirectories and flattens into targetDir.
+     */
+    private fun copyModelsFromAssetsIfPresent(targetDir: File): Boolean {
+        try {
+            val assetManager = context.assets ?: return false
+            val candidateDirs = listOf("sherpa-onnx", "models/sherpa-onnx", "")
+            for (subDir in candidateDirs) {
+                val list = assetManager.list(subDir) ?: continue
+                val hasEncoder = list.any { it.contains("encoder", ignoreCase = true) && it.endsWith(".onnx", ignoreCase = true) }
+                val hasDecoder = list.any { it.contains("decoder", ignoreCase = true) && it.endsWith(".onnx", ignoreCase = true) }
+                val hasJoiner = list.any { it.contains("joiner", ignoreCase = true) && it.endsWith(".onnx", ignoreCase = true) }
+                val hasTokens = list.any { it.contains("tokens", ignoreCase = true) && it.endsWith(".txt", ignoreCase = true) }
+
+                if (hasEncoder && hasDecoder && hasJoiner && hasTokens) {
+                    targetDir.mkdirs()
+                    for (fileName in list) {
+                        val assetPath = if (subDir.isEmpty()) fileName else "$subDir/$fileName"
+                        val destFile = File(targetDir, fileName)
+                        if (!destFile.exists() || destFile.length() == 0L) {
+                            assetManager.open(assetPath).use { input ->
+                                FileOutputStream(destFile).use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                        }
+                    }
+                    modelManager.flattenSherpaModelDirectory(targetDir)
+                    return true
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Asset fallback check failed: ${e.message}")
+        }
+        return false
+    }
+
     private fun resolveFromDirectory(dir: File, id: String): LoadedModelFiles? {
         if (!dir.exists() || !dir.isDirectory) return null
 
-        val minOnnxSize = 1_000_000L // 1 MB per ONNX file validation
-        val enc = File(dir, "encoder.int8.onnx").let { if (it.exists() && it.length() > minOnnxSize) it else modelManager.findFileByKeyword(dir, "encoder") }
-        val dec = File(dir, "decoder.int8.onnx").let { if (it.exists() && it.length() > minOnnxSize) it else modelManager.findFileByKeyword(dir, "decoder") }
-        val joi = File(dir, "joiner.int8.onnx").let { if (it.exists() && it.length() > minOnnxSize) it else modelManager.findFileByKeyword(dir, "joiner") }
-        val tok = File(dir, "tokens.txt").let { if (it.exists() && it.length() > 10L) it else modelManager.findFileByKeyword(dir, "tokens") }
+        val minEncoderSize = 5_000_000L // 5 MB
+        val minDecoderSize = 500_000L   // 500 KB
+        val minJoinerSize = 50_000L     // 50 KB (joiner is ~260 KB)
+        val minTokensSize = 50L         // 50 bytes
+        val enc = File(dir, "encoder.int8.onnx").let { if (it.exists() && it.length() > minEncoderSize) it else modelManager.findFileByKeyword(dir, "encoder") }
+        val dec = File(dir, "decoder.int8.onnx").let { if (it.exists() && it.length() > minDecoderSize) it else modelManager.findFileByKeyword(dir, "decoder") }
+        val joi = File(dir, "joiner.int8.onnx").let { if (it.exists() && it.length() > minJoinerSize) it else modelManager.findFileByKeyword(dir, "joiner") }
+        val tok = File(dir, "tokens.txt").let { if (it.exists() && it.length() > minTokensSize) it else modelManager.findFileByKeyword(dir, "tokens") }
 
-        if (enc != null && enc.length() > minOnnxSize &&
-            dec != null && dec.length() > minOnnxSize &&
-            joi != null && joi.length() > minOnnxSize &&
-            tok != null && tok.length() > 10L
+        if (enc != null && enc.length() > minEncoderSize &&
+            dec != null && dec.length() > minDecoderSize &&
+            joi != null && joi.length() > minJoinerSize &&
+            tok != null && tok.length() > minTokensSize
         ) {
             return LoadedModelFiles(id, enc, dec, joi, tok)
         }
