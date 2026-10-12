@@ -330,8 +330,17 @@ class ModelManager(private val context: Context) {
     fun getAvailableStorageMb(): Long {
         val cached = _availableStorageMb.value
         if (cached > 0L) return cached
-        scope.launch { refreshAvailableStorage() }
-        return 500L
+
+        return try {
+            val statFs = StatFs(context.filesDir.path)
+            val availableBytes = statFs.availableBlocksLong * statFs.blockSizeLong
+            val mb = availableBytes / (1024L * 1024L)
+            _availableStorageMb.value = mb
+            mb
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed reading StatFs during storage fallback: ${e.message}")
+            0L
+        }
     }
 
     /**
@@ -457,10 +466,14 @@ class ModelManager(private val context: Context) {
         return areSherpaFilesPresent()
     }
 
+    private fun hasUsableModelFile(file: File?, minBytes: Long): Boolean {
+        return file != null && file.exists() && file.length() >= minBytes
+    }
+
     /**
-     * Checks if the required normalized files (encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt)
-     * exist directly in context.filesDir/models/sherpa-onnx/.
-     * Validates that encoder > 5MB, decoder > 500KB, joiner > 50KB, tokens > 50 bytes.
+     * Checks if the required normalized files exist directly in context.filesDir/models/sherpa-onnx/.
+     * The validation is intentionally permissive: valid ONNX files can vary slightly, and overly strict
+     * size thresholds cause false negatives even after a successful extraction.
      */
     fun areSherpaFilesPresent(): Boolean {
         val modelDir = File(context.filesDir, "models/sherpa-onnx")
@@ -471,16 +484,16 @@ class ModelManager(private val context: Context) {
         val joiner = File(modelDir, "joiner.int8.onnx")
         val tokens = File(modelDir, "tokens.txt")
 
-        val encoderValid = encoder.exists() && encoder.length() > 5_000_000L // > 5 MB
-        val decoderValid = decoder.exists() && decoder.length() > 500_000L   // > 500 KB
-        val joinerValid = joiner.exists() && joiner.length() > 50_000L       // > 50 KB (joiner is ~260 KB!)
-        val tokensValid = tokens.exists() && tokens.length() > 50L          // > 50 bytes
+        val encoderValid = hasUsableModelFile(encoder, 1_000_000L)
+        val decoderValid = hasUsableModelFile(decoder, 100_000L)
+        val joinerValid = hasUsableModelFile(joiner, 10_000L)
+        val tokensValid = hasUsableModelFile(tokens, 10L)
 
         if (encoderValid && decoderValid && joinerValid && tokensValid) {
             return true
         }
 
-        // If unflattened nested files exist, attempt a flattening pass
+        // If unflattened nested files exist, attempt a flattening pass.
         val hasNestedFiles = modelDir.walkTopDown().any { file ->
             file.isFile && file.parentFile != modelDir && (file.name.endsWith(".onnx", ignoreCase = true) || file.name.endsWith(".txt", ignoreCase = true))
         }
@@ -492,10 +505,10 @@ class ModelManager(private val context: Context) {
             val tok = allFiles.firstOrNull { it.name.contains("tokens", ignoreCase = true) && it.name.endsWith(".txt") }
             if (enc != null && dec != null && joi != null && tok != null) {
                 flattenSherpaModelDirectory(modelDir)
-                return encoder.exists() && encoder.length() > 5_000_000L &&
-                        decoder.exists() && decoder.length() > 500_000L &&
-                        joiner.exists() && joiner.length() > 50_000L &&
-                        tokens.exists() && tokens.length() > 50L
+                return hasUsableModelFile(encoder, 1_000_000L) &&
+                        hasUsableModelFile(decoder, 100_000L) &&
+                        hasUsableModelFile(joiner, 10_000L) &&
+                        hasUsableModelFile(tokens, 10L)
             }
         }
 
@@ -561,10 +574,10 @@ class ModelManager(private val context: Context) {
             val joiner = findFileInDir(dir, model.joinerFilename) ?: findFileByKeyword(dir, "joiner")
             val tokens = findFileInDir(dir, model.tokensFilename) ?: findFileByKeyword(dir, "tokens.txt")
 
-            if (encoder != null && encoder.length() > 5_000_000L &&
-                decoder != null && decoder.length() > 500_000L &&
-                joiner != null && joiner.length() > 50_000L &&
-                tokens != null && tokens.length() > 50L
+            if (hasUsableModelFile(encoder, 1_000_000L) &&
+                hasUsableModelFile(decoder, 100_000L) &&
+                hasUsableModelFile(joiner, 10_000L) &&
+                hasUsableModelFile(tokens, 10L)
             ) {
                 return ResolvedModelFiles(model, encoder, decoder, joiner, tokens)
             }
@@ -580,15 +593,15 @@ class ModelManager(private val context: Context) {
         // 0. Primary path: check context.filesDir/models/sherpa-onnx
         val sherpaDir = File(context.filesDir, "models/sherpa-onnx")
         if (sherpaDir.exists() && sherpaDir.isDirectory) {
-            val enc = File(sherpaDir, "encoder.int8.onnx").let { if (it.exists() && it.length() > 5_000_000L) it else findFileByKeyword(sherpaDir, "encoder") }
-            val dec = File(sherpaDir, "decoder.int8.onnx").let { if (it.exists() && it.length() > 500_000L) it else findFileByKeyword(sherpaDir, "decoder") }
-            val joi = File(sherpaDir, "joiner.int8.onnx").let { if (it.exists() && it.length() > 50_000L) it else findFileByKeyword(sherpaDir, "joiner") }
-            val tok = File(sherpaDir, "tokens.txt").let { if (it.exists() && it.length() > 50L) it else findFileByKeyword(sherpaDir, "tokens") }
+            val enc = File(sherpaDir, "encoder.int8.onnx").let { if (hasUsableModelFile(it, 1_000_000L)) it else findFileByKeyword(sherpaDir, "encoder") }
+            val dec = File(sherpaDir, "decoder.int8.onnx").let { if (hasUsableModelFile(it, 100_000L)) it else findFileByKeyword(sherpaDir, "decoder") }
+            val joi = File(sherpaDir, "joiner.int8.onnx").let { if (hasUsableModelFile(it, 10_000L)) it else findFileByKeyword(sherpaDir, "joiner") }
+            val tok = File(sherpaDir, "tokens.txt").let { if (hasUsableModelFile(it, 10L)) it else findFileByKeyword(sherpaDir, "tokens") }
 
-            if (enc != null && enc.length() > 5_000_000L &&
-                dec != null && dec.length() > 500_000L &&
-                joi != null && joi.length() > 50_000L &&
-                tok != null && tok.length() > 50L
+            if (hasUsableModelFile(enc, 1_000_000L) &&
+                hasUsableModelFile(dec, 100_000L) &&
+                hasUsableModelFile(joi, 10_000L) &&
+                hasUsableModelFile(tok, 10L)
             ) {
                 return ResolvedModelFiles(preferredModel, enc, dec, joi, tok)
             }
@@ -624,10 +637,10 @@ class ModelManager(private val context: Context) {
         val joiner = findFileByKeyword(rootDir, "joiner")
         val tokens = findFileByKeyword(rootDir, "tokens")
 
-        if (encoder != null && encoder.length() > 5_000_000L &&
-            decoder != null && decoder.length() > 500_000L &&
-            joiner != null && joiner.length() > 50_000L &&
-            tokens != null && tokens.length() > 50L
+        if (hasUsableModelFile(encoder, 1_000_000L) &&
+            hasUsableModelFile(decoder, 100_000L) &&
+            hasUsableModelFile(joiner, 10_000L) &&
+            hasUsableModelFile(tokens, 10L)
         ) {
             // Find which model best matches by filename, or fallback to preferred
             val matchingModel = availableModels.firstOrNull { model ->

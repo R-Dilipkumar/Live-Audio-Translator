@@ -5,8 +5,6 @@ import android.util.Log
 import com.example.service.NotificationHelper
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
-import com.google.mlkit.nl.languageid.LanguageIdentification
-import com.google.mlkit.nl.languageid.LanguageIdentifier
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.translate.Translation
@@ -28,9 +26,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 data class SupportedLanguage(
     val code: String,
@@ -72,13 +67,6 @@ class LocalTranslatorEngine(private val context: Context) {
         Log.w(TAG, "RemoteModelManager unavailable: ${e.message}")
         null
     }
-    private val languageIdentifier: LanguageIdentifier? = try {
-        LanguageIdentification.getClient()
-    } catch (e: Exception) {
-        Log.w(TAG, "LanguageIdentification unavailable: ${e.message}")
-        null
-    }
-
     val autoDetectLanguage = SupportedLanguage("auto", "Auto-Detect", "🌐", isAutoDetect = true)
 
     val availableLanguages = listOf(
@@ -158,66 +146,10 @@ class LocalTranslatorEngine(private val context: Context) {
 
     private val activeDownloadKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-    // Retained previously identified language for confidence threshold fallback
-    private var lastIdentifiedLanguage: String = TranslateLanguage.JAPANESE
-    // Configurable Language ID Confidence threshold (minimum 0.85 score before switching active source language)
-    var confidenceThreshold: Float = 0.85f
-    // Language Hysteresis: Require 2 consecutive high-confidence detections before changing active source language
-    private var candidateLanguage: String? = null
-    private var candidateConfidenceCount: Int = 0
-    // Fallback cache for stable translations
-    private var lastStableTranslation: String? = null
-
-    // Sequential queue with draft preemption and epoch tracking
-    private data class TranslationTask(
-        val text: String,
-        val isFinal: Boolean,
-        val utteranceId: Long = 0L,
-        val timestamp: Long = System.currentTimeMillis()
-    )
-
-    private val translationChannel = Channel<TranslationTask>(capacity = Channel.UNLIMITED)
-    private val translationMutex = Mutex()
-    private val taskLock = Any()
-    private var pendingDraftText: String? = null
-
     init {
         scope.launch {
             refreshDownloadedLanguages()
             checkAndPrepareTranslator()
-        }
-        startSequentialTranslationWorker()
-    }
-
-    private fun startSequentialTranslationWorker() {
-        scope.launch(Dispatchers.Default) {
-            for (task in translationChannel) {
-                // Draft preemption: If this is a draft and a newer draft has already arrived, skip this stale draft
-                if (!task.isFinal) {
-                    val currentPending = synchronized(taskLock) { pendingDraftText }
-                    if (currentPending != null && currentPending != task.text) {
-                        Log.d(TAG, "Preempted stale partial draft: \"${task.text}\" for newer draft: \"$currentPending\"")
-                        continue
-                    }
-                }
-
-                // Process translations sequentially with Mutex lock
-                translationMutex.withLock {
-                    try {
-                        processTranslationInternal(task.text, task.isFinal, task.utteranceId)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Sequential translation execution error: ${e.message}")
-                    } finally {
-                        if (!task.isFinal) {
-                            synchronized(taskLock) {
-                                if (pendingDraftText == task.text) {
-                                    pendingDraftText = null
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -235,9 +167,6 @@ class LocalTranslatorEngine(private val context: Context) {
     fun setSourceLanguage(language: SupportedLanguage) {
         if (_sourceLanguage.value != language) {
             _sourceLanguage.value = language
-            // BUG 8 FIX: Clear stale fallback so a failure after a language change doesn't
-            // display a translation from the previous language pair.
-            lastStableTranslation = null
             scope.launch { checkAndPrepareTranslator() }
         }
     }
@@ -245,8 +174,6 @@ class LocalTranslatorEngine(private val context: Context) {
     fun setTargetLanguage(language: SupportedLanguage) {
         if (_targetLanguage.value != language && !language.isAutoDetect) {
             _targetLanguage.value = language
-            // BUG 8 FIX: Clear stale fallback on target language change.
-            lastStableTranslation = null
             scope.launch { checkAndPrepareTranslator() }
         }
     }
@@ -257,7 +184,6 @@ class LocalTranslatorEngine(private val context: Context) {
         if (!src.isAutoDetect) {
             _sourceLanguage.value = tgt
             _targetLanguage.value = src
-            lastStableTranslation = null
             scope.launch { checkAndPrepareTranslator() }
         }
     }
@@ -320,7 +246,6 @@ class LocalTranslatorEngine(private val context: Context) {
 
     /**
      * Pre-flight check and client setup when switching active source/target language pairs.
-     * CRITICAL: NEVER triggers downloads. If models are missing, flags state as NeedsDownload without stalling.
      */
     suspend fun checkAndPrepareTranslator() = withContext(Dispatchers.IO) {
         _packStatus.value = TranslationPackStatus.Checking
@@ -486,104 +411,7 @@ class LocalTranslatorEngine(private val context: Context) {
     }
 
     /**
-     * Instantly identifies language script characteristics (Hiragana/Katakana -> Japanese,
-     * Hangul -> Korean, Cyrillic -> Russian, Arabic -> Arabic, Han -> Chinese, Thai -> Thai).
-     * Prevents short foreign dialogue from incorrectly falling back to English.
-     */
-    fun detectScriptLanguage(text: String): String? {
-        var hasHiraganaOrKatakana = false
-        var hasHangul = false
-        var hasThai = false
-        var hasArabic = false
-        var hasCyrillic = false
-        var hasHan = false
-
-        for (char in text) {
-            val code = char.code
-            when {
-                (code in 0x3040..0x309F) || (code in 0x30A0..0x30FF) -> hasHiraganaOrKatakana = true
-                (code in 0xAC00..0xD7AF) || (code in 0x1100..0x11FF) -> hasHangul = true
-                code in 0x0E00..0x0E7F -> hasThai = true
-                code in 0x0600..0x06FF -> hasArabic = true
-                code in 0x0400..0x04FF -> hasCyrillic = true
-                code in 0x4E00..0x9FFF -> hasHan = true
-            }
-        }
-
-        return when {
-            hasHiraganaOrKatakana -> TranslateLanguage.JAPANESE
-            hasHangul -> TranslateLanguage.KOREAN
-            hasThai -> "th"
-            hasArabic -> TranslateLanguage.ARABIC
-            hasCyrillic -> TranslateLanguage.RUSSIAN
-            hasHan -> TranslateLanguage.CHINESE
-            else -> null
-        }
-    }
-
-    /**
-     * Identifies the language of the provided text via script heuristics and ML Kit Language Identification.
-     * Enforces language hysteresis: requires confidence >= 0.85 and 2 consecutive detections before switching languages.
-     * Prevents false "en" classification of non-Latin languages.
-     */
-    suspend fun identifyLanguage(text: String): String = withContext(Dispatchers.IO) {
-        val scriptDetected = detectScriptLanguage(text)
-        if (scriptDetected != null) {
-            lastIdentifiedLanguage = scriptDetected
-            candidateLanguage = null
-            candidateConfidenceCount = 0
-            return@withContext scriptDetected
-        }
-
-        val identifier = languageIdentifier ?: return@withContext lastIdentifiedLanguage
-        try {
-            val possibleLanguages = identifier.identifyPossibleLanguages(text).await()
-            val best = possibleLanguages.maxByOrNull { it.confidence }
-            val threshold = confidenceThreshold // 0.85
-            if (best != null && best.languageTag != "und" && best.confidence >= threshold) {
-                val detectedTag = best.languageTag
-                if (detectedTag == lastIdentifiedLanguage) {
-                    // Already active language
-                    candidateLanguage = null
-                    candidateConfidenceCount = 0
-                    lastIdentifiedLanguage
-                } else {
-                    // Language Hysteresis: Require 2 consecutive high-confidence detections before switching
-                    if (candidateLanguage == detectedTag) {
-                        candidateConfidenceCount++
-                        if (candidateConfidenceCount >= 2) {
-                            Log.i(TAG, "Language hysteresis gate confirmed switch to $detectedTag ($candidateConfidenceCount detections @ ${best.confidence})")
-                            lastIdentifiedLanguage = detectedTag
-                            candidateLanguage = null
-                            candidateConfidenceCount = 0
-                            lastIdentifiedLanguage
-                        } else {
-                            Log.d(TAG, "Language candidate $detectedTag seen $candidateConfidenceCount/2 times. Retaining $lastIdentifiedLanguage")
-                            lastIdentifiedLanguage
-                        }
-                    } else {
-                        candidateLanguage = detectedTag
-                        candidateConfidenceCount = 1
-                        Log.d(TAG, "New language candidate $detectedTag (confidence=${best.confidence}). Waiting for 2nd consecutive detection. Retaining $lastIdentifiedLanguage")
-                        lastIdentifiedLanguage
-                    }
-                }
-            } else {
-                Log.d(TAG, "Language confidence below $threshold threshold (best=${best?.languageTag}@${best?.confidence}). Retaining last identified: $lastIdentifiedLanguage")
-                candidateLanguage = null
-                candidateConfidenceCount = 0
-                lastIdentifiedLanguage
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Language identification failed: ${e.message}. Retaining $lastIdentifiedLanguage")
-            lastIdentifiedLanguage
-        }
-    }
-
-    /**
-     * Explicitly downloads the translation model pair using ML Kit Translator.downloadModelIfNeeded().
-     * RESTRICTED: Callable strictly from explicit user actions inside the "Manage Models" screen.
-     * It is NEVER called during live audio processing, streaming callbacks, or active utterance dispatching.
+     * Downloads the translation model pair for explicit user action, typically from the model management screen.
      */
     suspend fun downloadModelPairExplicitly(srcCode: String, tgtCode: String, conditions: DownloadConditions = DownloadConditions.Builder().build()): Boolean = withContext(Dispatchers.IO) {
         val key = "${srcCode}_$tgtCode"
@@ -629,8 +457,6 @@ class LocalTranslatorEngine(private val context: Context) {
 
     /**
      * Gets or creates a Translator client for a given source and target code.
-     * CRITICAL: downloadModelIfNeeded() is NEVER called here. Only pre-downloaded/cached
-     * models are loaded on the fly without network downloads.
      */
     private suspend fun getOrCreateTranslator(srcCode: String, tgtCode: String): Translator? = withContext(Dispatchers.IO) {
         val key = "${srcCode}_$tgtCode"
@@ -644,7 +470,6 @@ class LocalTranslatorEngine(private val context: Context) {
                 .setTargetLanguage(tgtCode)
                 .build()
             val translator = Translation.getClient(options)
-            // CRITICAL: downloadModelIfNeeded() is NEVER called during live translation
             synchronized(cacheLock) {
                 translatorCache[key] = translator
             }
@@ -656,55 +481,29 @@ class LocalTranslatorEngine(private val context: Context) {
     }
 
     /**
-     * Translates a text string asynchronously via the sequential translation queue.
-     * [isFinal] indicates whether the text is a committed final utterance (true) or an in-progress draft (false).
-     * [utteranceId] identifies the utterance epoch to eliminate disappearing or out-of-order subtitles.
-     * Drafts are subject to preemption if newer drafts arrive. Final commits are never dropped.
+     * Submits a translation request using the minimal ML Kit path required by the app.
      */
     fun translateText(originalText: String, isFinal: Boolean = true, utteranceId: Long = 0L) {
         val trimmed = originalText.trim()
         if (trimmed.isEmpty()) return
-
-        if (!isFinal) {
-            synchronized(taskLock) {
-                pendingDraftText = trimmed
-            }
+        scope.launch {
+            processTranslationInternal(trimmed, isFinal, utteranceId)
         }
-
-        translationChannel.trySend(TranslationTask(trimmed, isFinal, utteranceId))
     }
 
     private suspend fun processTranslationInternal(trimmed: String, isFinal: Boolean, utteranceId: Long) {
         val srcLang = _sourceLanguage.value
         val tgtCode = _targetLanguage.value.code
-
-        // 1. Determine Source Language (Script detection + Language ID)
-        // No Language ID on short Partial Drafts:
-        // NEVER run ML Kit Language Identification on streaming partials unless text has at least 25 characters,
-        // or it is a committed Final utterance. For short partial drafts, reuse the current active source language.
         val detectedCode = if (srcLang.isAutoDetect) {
-            val script = detectScriptLanguage(trimmed)
-            if (script != null) {
-                _lastDetectedLanguage.value = script
-                script
-            } else if (isFinal || trimmed.length >= 25) {
-                val idResult = identifyLanguage(trimmed)
-                _lastDetectedLanguage.value = idResult
-                idResult
-            } else {
-                // Short partial draft: use active retained language without triggering ML Kit LangID
-                lastIdentifiedLanguage
-            }
+            _lastDetectedLanguage.value ?: TranslateLanguage.ENGLISH
         } else {
             srcLang.code
         }
+        _lastDetectedLanguage.value = detectedCode
 
         val detectedName = availableLanguages.find { it.code == detectedCode }?.displayName ?: detectedCode
         val srcCodeForEmission = if (srcLang.isAutoDetect) "auto ($detectedCode)" else detectedCode
 
-        // 2. Target Language Passthrough & Mirroring check:
-        // If the identified source language matches the user-selected target language (e.g. both English),
-        // completely bypass ML Kit and emit the original transcript directly.
         if (detectedCode == tgtCode) {
             emitTranslation(
                 TranslationResult(
@@ -720,17 +519,8 @@ class LocalTranslatorEngine(private val context: Context) {
             return
         }
 
-        // 3. Pre-Flight Model Cache Validation via RemoteModelManager:
-        // Before attempting translation:
-        // Check whether the models are already downloaded on-device using RemoteModelManager.getInstance().isModelDownloaded(model).
-        // Both the source language pack and target language pack (plus English if pivoting) must be confirmed as downloaded on disk.
-        // Fallback Behavior when Models are Missing:
-        // If any required language model is NOT downloaded, DO NOT trigger a download.
-        // Gracefully bypass ML Kit and emit the original transcript directly to the UI state flow without stalling, suspending, or dropping audio frames.
-        val areModelsReady = areRequiredModelsDownloaded(detectedCode, tgtCode)
-        if (!areModelsReady) {
+        if (!areRequiredModelsDownloaded(detectedCode, tgtCode)) {
             _isModelMissing.value = true
-            Log.d(TAG, "Required models not downloaded for pair (${detectedCode} -> ${tgtCode}). Bypassing ML Kit and emitting original transcript without blocking.")
             emitTranslation(
                 TranslationResult(
                     originalText = trimmed,
@@ -747,16 +537,11 @@ class LocalTranslatorEngine(private val context: Context) {
 
         _isModelMissing.value = false
         val key = "${detectedCode}_$tgtCode"
-        var translatorToUse = synchronized(cacheLock) { translatorCache[key] }
-
-        if (translatorToUse == null) {
-            translatorToUse = getOrCreateTranslator(detectedCode, tgtCode)
-        }
+        val translatorToUse = synchronized(cacheLock) { translatorCache[key] } ?: getOrCreateTranslator(detectedCode, tgtCode)
 
         if (translatorToUse != null) {
             performTranslation(translatorToUse, trimmed, srcCodeForEmission, tgtCode, detectedName, isFinal, utteranceId)
         } else {
-            // If client creation failed, emit original transcript directly without stalling
             emitTranslation(
                 TranslationResult(
                     originalText = trimmed,
@@ -782,7 +567,6 @@ class LocalTranslatorEngine(private val context: Context) {
     ) {
         try {
             val translated = translator.translate(text).await()
-            lastStableTranslation = translated
             emitTranslation(
                 TranslationResult(
                     originalText = text,
@@ -795,7 +579,7 @@ class LocalTranslatorEngine(private val context: Context) {
                 )
             )
         } catch (error: Exception) {
-            Log.w(TAG, "ML Kit translation failed (${error.localizedMessage}). Bypassing and emitting original transcript directly.")
+            Log.w(TAG, "ML Kit translation failed (${error.localizedMessage})")
             emitTranslation(
                 TranslationResult(
                     originalText = text,
@@ -808,149 +592,6 @@ class LocalTranslatorEngine(private val context: Context) {
                 )
             )
         }
-    }
-
-    /**
-     * Offline fallback dictionary that translates common conversational, anime, gaming,
-     * and media phrases when Google Play services, Firebase, or downloaded packs are absent.
-     */
-    fun fallbackOfflineTranslate(text: String, srcCode: String, tgtCode: String): String {
-        val clean = text.trim()
-        val lower = clean.lowercase()
-
-        val jaToEn = mapOf(
-            "こんにちは" to "Hello",
-            "ありがとう" to "Thank you",
-            "ありがとうございます" to "Thank you very much",
-            "助けて" to "Help me!",
-            "助けてください" to "Please help me!",
-            "行くぞ" to "Let's go!",
-            "行こう" to "Let's go",
-            "勝った" to "We won!",
-            "負けた" to "We lost",
-            "敵" to "Enemy",
-            "敵を発見" to "Enemy spotted",
-            "大丈夫" to "I'm okay",
-            "大丈夫ですか" to "Are you okay?",
-            "何" to "What?",
-            "待って" to "Wait!",
-            "すごい" to "Amazing!",
-            "はい" to "Yes",
-            "いいえ" to "No",
-            "本当に" to "Really?",
-            "おはよう" to "Good morning",
-            "こんばんは" to "Good evening",
-            "さようなら" to "Goodbye",
-            "危ない" to "Look out!"
-        )
-
-        val zhToEn = mapOf(
-            "你好" to "Hello",
-            "谢谢" to "Thank you",
-            "救命" to "Help me!",
-            "走吧" to "Let's go",
-            "冲啊" to "Let's go!",
-            "我们赢了" to "We won!",
-            "敌人" to "Enemy",
-            "小心" to "Be careful",
-            "没关系" to "It's okay",
-            "好的" to "Understood / Okay",
-            "再见" to "Goodbye",
-            "太棒了" to "Awesome!",
-            "等等" to "Wait"
-        )
-
-        val esToEn = mapOf(
-            "hola" to "Hello",
-            "gracias" to "Thank you",
-            "muchas gracias" to "Thank you very much",
-            "ayuda" to "Help!",
-            "vamos" to "Let's go!",
-            "ganamos" to "We won!",
-            "enemigo" to "Enemy",
-            "cuidado" to "Careful!",
-            "esta bien" to "It's okay",
-            "si" to "Yes",
-            "no" to "No",
-            "adios" to "Goodbye",
-            "amigo" to "Friend",
-            "buen trabajo" to "Good job!"
-        )
-
-        val enToEs = mapOf(
-            "hello" to "Hola",
-            "thank you" to "Gracias",
-            "help" to "Ayuda",
-            "let's go" to "Vamos",
-            "enemy" to "Enemigo",
-            "careful" to "Cuidado",
-            "yes" to "Sí",
-            "no" to "No",
-            "goodbye" to "Adiós"
-        )
-
-        val enToJa = mapOf(
-            "hello" to "こんにちは",
-            "thank you" to "ありがとう",
-            "help" to "助けて",
-            "let's go" to "行くぞ",
-            "enemy" to "敵",
-            "yes" to "はい",
-            "no" to "いいえ",
-            "goodbye" to "さようなら"
-        )
-
-        val enToZh = mapOf(
-            "hello" to "你好",
-            "thank you" to "谢谢",
-            "help" to "救命",
-            "let's go" to "走吧",
-            "enemy" to "敌人",
-            "yes" to "是的",
-            "no" to "不",
-            "goodbye" to "再见"
-        )
-
-        val pureSrc = srcCode.substringBefore(" ").removePrefix("auto (").removeSuffix(")")
-        val pureTgt = tgtCode.substringBefore(" ")
-
-        val matched = when {
-            pureSrc == "ja" && pureTgt == "en" -> jaToEn[clean] ?: jaToEn[lower]
-            pureSrc == "zh" && pureTgt == "en" -> zhToEn[clean] ?: zhToEn[lower]
-            pureSrc == "es" && pureTgt == "en" -> esToEn[lower]
-            pureSrc == "en" && pureTgt == "es" -> enToEs[lower]
-            pureSrc == "en" && pureTgt == "ja" -> enToJa[lower]
-            pureSrc == "en" && pureTgt == "zh" -> enToZh[lower]
-            else -> null
-        }
-
-        if (matched != null) return matched
-
-        val activeDict = when {
-            pureSrc == "ja" && pureTgt == "en" -> jaToEn
-            pureSrc == "zh" && pureTgt == "en" -> zhToEn
-            pureSrc == "es" && pureTgt == "en" -> esToEn
-            pureSrc == "en" && pureTgt == "es" -> enToEs
-            pureSrc == "en" && pureTgt == "ja" -> enToJa
-            pureSrc == "en" && pureTgt == "zh" -> enToZh
-            else -> emptyMap()
-        }
-
-        for ((key, value) in activeDict) {
-            if (clean.contains(key, ignoreCase = true)) {
-                return value
-            }
-        }
-
-        val srcPure = pureSrc.lowercase()
-        val tgtPure = pureTgt.lowercase()
-        if (srcPure == tgtPure) {
-            return clean
-        }
-
-        val srcName = srcPure.uppercase()
-        val tgtName = tgtPure.uppercase()
-        return "[Downloading ${srcName}-${tgtName} dictionary...] $clean"
     }
 
     private val translationLock = Any()
@@ -1006,7 +647,6 @@ class LocalTranslatorEngine(private val context: Context) {
                 }
                 translatorCache.clear()
             }
-            languageIdentifier?.close()
         } catch (_: Exception) {}
     }
 }

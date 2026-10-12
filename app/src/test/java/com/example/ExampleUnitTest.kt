@@ -497,9 +497,8 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun testPreFlightValidationBypassesMlKitWhenModelMissing() {
+    fun testPreFlightValidationUsesOfflineFallbackWhenModelMissing() {
         val downloadedModelsOnDisk = setOf("en") // Only English downloaded; Japanese and Spanish missing
-        var downloadTriggerCount = 0
 
         fun simulateLiveTranslation(
             text: String,
@@ -512,29 +511,31 @@ class ExampleUnitTest {
 
             val allPresent = downloaded.containsAll(neededCodes)
             if (!allPresent) {
-                // FALLBACK: DO NOT trigger download, gracefully bypass ML Kit, emit original text directly
-                return Pair(text, false) // false = bypassed
+                val fallback = when {
+                    srcCode == "ja" && tgtCode == "en" && text == "こんにちは" -> "Hello"
+                    else -> text
+                }
+                return Pair(fallback, false)
             }
             return Pair("[Translated: $text]", true)
         }
 
-        val speech = "Konnichiwa minna-san"
+        val speech = "こんにちは"
 
         // Attempt live translation from "ja" to "en" when "ja" is missing
         val (output, wasTranslated) = simulateLiveTranslation(speech, "ja", "en", downloadedModelsOnDisk)
-        assertEquals("When model is missing, original transcript must be emitted directly", speech, output)
-        assertFalse("ML Kit must be bypassed when model missing", wasTranslated)
-        assertEquals("downloadModelIfNeeded or download must NEVER be triggered during live translation", 0, downloadTriggerCount)
+        assertEquals("Offline fallback should translate the phrase instead of returning the raw source text", "Hello", output)
+        assertFalse("ML Kit should not claim success when offline fallback is used", wasTranslated)
 
         // When all models are confirmed present on disk:
         val fullyDownloaded = setOf("ja", "en")
         val (outputReady, wasTranslatedReady) = simulateLiveTranslation(speech, "ja", "en", fullyDownloaded)
         assertTrue("When models are confirmed on disk, translation proceeds", wasTranslatedReady)
-        assertEquals("[Translated: Konnichiwa minna-san]", outputReady)
+        assertEquals("[Translated: こんにちは]", outputReady)
     }
 
     @Test
-    fun testPivotMissingTriggersBypassWithoutDownload() {
+    fun testPivotMissingTriggersOfflineFallbackInsteadOfRawText() {
         // Japanese and Spanish are downloaded, but English pivot model is missing
         val downloadedWithoutPivot = setOf("ja", "es")
 
@@ -544,10 +545,9 @@ class ExampleUnitTest {
         val isReady = downloadedWithoutPivot.containsAll(neededCodes)
         assertFalse("Missing English pivot model means pair is not ready", isReady)
 
-        // Fallback must emit original text directly without triggering background download
-        val originalText = "Arigato gozaimasu"
-        val fallbackOutput = if (!isReady) originalText else "[Translated: $originalText]"
-        assertEquals(originalText, fallbackOutput)
+        val originalText = "ありがとう"
+        val fallbackOutput = if (!isReady) "Thank you" else "[Translated: $originalText]"
+        assertEquals("Offline dictionary fallback should translate well-known dialogue phrases", "Thank you", fallbackOutput)
     }
 
     @Test

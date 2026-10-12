@@ -272,10 +272,10 @@ class SpeechRecognizerEngine(
         // 3. Fallback: ModelManager resolution with strict validation
         val resolved = modelManager.resolveModelFiles(modelManager.selectedModel.value)
         if (resolved != null &&
-            resolved.encoderFile.length() > 5_000_000L &&
-            resolved.decoderFile.length() > 500_000L &&
-            resolved.joinerFile.length() > 50_000L &&
-            resolved.tokensFile.length() > 50L
+            resolved.encoderFile.length() >= 1_000_000L &&
+            resolved.decoderFile.length() >= 100_000L &&
+            resolved.joinerFile.length() >= 10_000L &&
+            resolved.tokensFile.length() >= 10L
         ) {
             return LoadedModelFiles(
                 modelId = resolved.model.id,
@@ -329,19 +329,19 @@ class SpeechRecognizerEngine(
     private fun resolveFromDirectory(dir: File, id: String): LoadedModelFiles? {
         if (!dir.exists() || !dir.isDirectory) return null
 
-        val minEncoderSize = 5_000_000L // 5 MB
-        val minDecoderSize = 500_000L   // 500 KB
-        val minJoinerSize = 50_000L     // 50 KB (joiner is ~260 KB)
-        val minTokensSize = 50L         // 50 bytes
-        val enc = File(dir, "encoder.int8.onnx").let { if (it.exists() && it.length() > minEncoderSize) it else modelManager.findFileByKeyword(dir, "encoder") }
-        val dec = File(dir, "decoder.int8.onnx").let { if (it.exists() && it.length() > minDecoderSize) it else modelManager.findFileByKeyword(dir, "decoder") }
-        val joi = File(dir, "joiner.int8.onnx").let { if (it.exists() && it.length() > minJoinerSize) it else modelManager.findFileByKeyword(dir, "joiner") }
-        val tok = File(dir, "tokens.txt").let { if (it.exists() && it.length() > minTokensSize) it else modelManager.findFileByKeyword(dir, "tokens") }
+        val minEncoderSize = 1_000_000L
+        val minDecoderSize = 100_000L
+        val minJoinerSize = 10_000L
+        val minTokensSize = 10L
+        val enc = File(dir, "encoder.int8.onnx").let { if (it.exists() && it.length() >= minEncoderSize) it else modelManager.findFileByKeyword(dir, "encoder") }
+        val dec = File(dir, "decoder.int8.onnx").let { if (it.exists() && it.length() >= minDecoderSize) it else modelManager.findFileByKeyword(dir, "decoder") }
+        val joi = File(dir, "joiner.int8.onnx").let { if (it.exists() && it.length() >= minJoinerSize) it else modelManager.findFileByKeyword(dir, "joiner") }
+        val tok = File(dir, "tokens.txt").let { if (it.exists() && it.length() >= minTokensSize) it else modelManager.findFileByKeyword(dir, "tokens") }
 
-        if (enc != null && enc.length() > minEncoderSize &&
-            dec != null && dec.length() > minDecoderSize &&
-            joi != null && joi.length() > minJoinerSize &&
-            tok != null && tok.length() > minTokensSize
+        if (enc != null && enc.length() >= minEncoderSize &&
+            dec != null && dec.length() >= minDecoderSize &&
+            joi != null && joi.length() >= minJoinerSize &&
+            tok != null && tok.length() >= minTokensSize
         ) {
             return LoadedModelFiles(id, enc, dec, joi, tok)
         }
