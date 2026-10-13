@@ -17,3 +17,6 @@ local.properties
 .env
 debug.keystore
 
+
+# Local session notes
+SESSION.md
