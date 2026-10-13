@@ -2,9 +2,6 @@ package com.example.ui
 
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.items
@@ -21,10 +18,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.material3.LinearProgressIndicator
-import com.example.asr.DownloadState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Error
@@ -62,6 +55,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -101,7 +95,7 @@ fun MainScreen(
     val availableLanguages = viewModel.availableLanguages
     val targetLanguages = viewModel.targetAvailableLanguages
     val originalSpeech by viewModel.currentOriginalSpeech.collectAsStateWithLifecycle()
-    val translatedSpeech by viewModel.currentTranslatedSpeech.collectAsStateWithLifecycle()
+    val translatedSpeech by viewModel.liveDraftTranslation.collectAsStateWithLifecycle()
     val partialSpeech by viewModel.livePartialSpeech.collectAsStateWithLifecycle()
     val isMicMode by viewModel.isMicMode.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
@@ -111,7 +105,7 @@ fun MainScreen(
     val isOverlayActive by viewModel.isFloatingOverlayActive.collectAsStateWithLifecycle()
     val overlaySettings by viewModel.floatingSettings.collectAsStateWithLifecycle()
     val isDrmSilenceDetected by viewModel.isDrmSilenceDetected.collectAsStateWithLifecycle()
-    val sherpaDownloadState by viewModel.sherpaDownloadState.collectAsStateWithLifecycle()
+    val isSelectedAsrModelInstalled by viewModel.isSelectedAsrModelInstalled.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedTab by remember { mutableIntStateOf(0) } // 0: Translate, 1: Manage Models
@@ -120,22 +114,10 @@ fun MainScreen(
 
     var showHistorySheet by remember { mutableStateOf(false) }
 
-    // Guarded First-Launch Model Setup Flow:
-    // On cold launch, check if model files are ready. If missing, trigger download and show onboarding dialog.
-    // Do NOT call viewModel.initializeSpeechRecognizer() here on cold launch.
+    // On cold launch, load the selected speech model if it is installed. Nothing is downloaded
+    // automatically; if no model is installed, the Translate tab points to Manage Models.
     LaunchedEffect(Unit) {
-        if (!viewModel.isSherpaModelReady()) {
-            viewModel.downloadSherpaModel()
-        } else {
-            viewModel.initializeSpeechRecognizer()
-        }
-    }
-
-    // Only initialize recognizer when ModelManager.downloadSherpaModel() completes with DownloadState.Ready
-    LaunchedEffect(sherpaDownloadState) {
-        if (sherpaDownloadState is DownloadState.Ready && viewModel.isSherpaModelReady()) {
-            viewModel.initializeSpeechRecognizer()
-        }
+        viewModel.initializeSpeechRecognizer()
     }
 
     LaunchedEffect(errorMessage) {
@@ -318,6 +300,36 @@ fun MainScreen(
                         .fillMaxSize()
                         .padding(horizontal = 14.dp, vertical = 4.dp)
                 ) {
+                    // Selected speech model is not installed: point to Manage Models
+                    if (!isSelectedAsrModelInstalled) {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 6.dp)
+                                .testTag("asr_model_missing_card"),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "No speech model installed. Download one to start translating.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(onClick = { selectedTab = 1 }) {
+                                    Text("Manage Models")
+                                }
+                            }
+                        }
+                    }
+
                     // Compact Controls Row: Audio Mode Filter Chips + Floating Overlay Button
                     Row(
                         modifier = Modifier
@@ -433,11 +445,15 @@ fun MainScreen(
                     // Replaces in-app floating box with a live-updating, auto-scrolling conversation feed
                     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
-                    // Auto-scroll to newest item as history grows
-                    LaunchedEffect(history.size, originalSpeech, partialSpeech) {
-                        if (history.isNotEmpty()) {
-                            listState.animateScrollToItem(history.size - 1)
-                        }
+                    // History is stored newest first. The feed reads top to bottom like a chat:
+                    // oldest of the last 100 lines at the top, newest (and the live line) at the bottom.
+                    val feed = remember(history) { history.take(100).asReversed() }
+                    val showLiveCard = isCapturing && SpeechValidator.isGenuineSpeech(partialSpeech)
+
+                    // Keep the newest line in view
+                    LaunchedEffect(feed.size, partialSpeech, translatedSpeech, showLiveCard) {
+                        val lastIndex = feed.size - 1 + (if (showLiveCard) 1 else 0)
+                        if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
                     }
 
                     Card(
@@ -507,9 +523,7 @@ fun MainScreen(
                                 }
                             }
 
-                            val hasActiveSpeech = isCapturing && (SpeechValidator.isGenuineSpeech(partialSpeech) || SpeechValidator.isGenuineSpeech(originalSpeech))
-
-                            if (history.isEmpty() && !hasActiveSpeech) {
+                            if (feed.isEmpty() && !showLiveCard) {
                                 // Clean Empty State UI:
                                 // If no speech has been captured yet, show a clean, centered Compose empty-state placeholder
                                 // rather than inserting synthetic status items into the list.
@@ -564,7 +578,7 @@ fun MainScreen(
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     items(
-                                        items = history,
+                                        items = feed,
                                         key = { it.id }
                                     ) { item ->
                                         val timeStr = remember(item.timestamp) {
@@ -648,9 +662,8 @@ fun MainScreen(
                                         }
                                     }
 
-                                    // Currently streaming live speech card (partial & latest)
-                                    val isLiveSpeechActive = isCapturing && (SpeechValidator.isGenuineSpeech(partialSpeech) || SpeechValidator.isGenuineSpeech(originalSpeech))
-                                    if (isLiveSpeechActive) {
+                                    // The sentence being spoken right now
+                                    if (showLiveCard) {
                                         item {
                                             Card(
                                                 modifier = Modifier
@@ -681,15 +694,7 @@ fun MainScreen(
                                                         )
                                                     }
 
-                                                    val liveOriginal = if (SpeechValidator.isGenuineSpeech(partialSpeech)) {
-                                                        if (SpeechValidator.isGenuineSpeech(originalSpeech)) {
-                                                            "$originalSpeech $partialSpeech"
-                                                        } else {
-                                                            partialSpeech
-                                                        }
-                                                    } else {
-                                                        originalSpeech
-                                                    }
+                                                    val liveOriginal = if (SpeechValidator.isGenuineSpeech(partialSpeech)) partialSpeech else originalSpeech
 
                                                     if (SpeechValidator.isGenuineSpeech(liveOriginal)) {
                                                         Text(
@@ -796,197 +801,5 @@ fun MainScreen(
             onClearAll = { viewModel.clearHistory() },
             onDeleteItem = { id -> viewModel.deleteHistoryItem(id) }
         )
-    }
-
-    // First-Launch Onboarding Modal: Non-dismissible Material 3 Dialog
-    val isSherpaReady = viewModel.isSherpaModelReady() || sherpaDownloadState is DownloadState.Ready
-    if (!isSherpaReady) {
-        Dialog(
-            onDismissRequest = { /* Non-dismissible: required for offline transcription */ },
-            properties = DialogProperties(
-                dismissOnBackPress = false,
-                dismissOnClickOutside = false
-            )
-        ) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp)
-                    .testTag("first_launch_model_setup_dialog"),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(60.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primaryContainer),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Hearing,
-                            contentDescription = null,
-                            modifier = Modifier.size(32.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Text(
-                        text = "Download Speech Recognition Engine",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Text(
-                        text = "This is a one-time ~40MB download required for offline transcription. All voice recognition runs directly on your device with complete privacy.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    when (val state = sherpaDownloadState) {
-                        is DownloadState.Downloading -> {
-                            val animatedProgress by animateFloatAsState(
-                                targetValue = state.progress,
-                                animationSpec = tween(durationMillis = 200, easing = LinearEasing),
-                                label = "model_download_progress"
-                            )
-
-                            LinearProgressIndicator(
-                                progress = { animatedProgress },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(8.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .testTag("model_linear_progress_indicator"),
-                                color = MaterialTheme.colorScheme.primary,
-                                trackColor = MaterialTheme.colorScheme.surfaceVariant
-                            )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                val percent = (state.progress * 100).toInt()
-                                Text(
-                                    text = "$percent%",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-
-                                val speedText = if (state.speedBytesPerSec > 1024 * 1024) {
-                                    String.format("%.1f MB/s", state.speedBytesPerSec / (1024f * 1024f))
-                                } else if (state.speedBytesPerSec > 1024) {
-                                    "${state.speedBytesPerSec / 1024} KB/s"
-                                } else {
-                                    "Downloading…"
-                                }
-
-                                Text(
-                                    text = speedText,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.testTag("model_download_speed")
-                                )
-                            }
-
-                            if (state.totalBytes > 0) {
-                                Spacer(modifier = Modifier.height(4.dp))
-                                val downloadedMb = state.bytesDownloaded / (1024f * 1024f)
-                                val totalMb = state.totalBytes / (1024f * 1024f)
-                                Text(
-                                    text = String.format("%.1f MB / %.1f MB", downloadedMb, totalMb),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-
-                        is DownloadState.Extracting -> {
-                            LinearProgressIndicator(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(8.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .testTag("model_extracting_progress_indicator"),
-                                color = MaterialTheme.colorScheme.tertiary,
-                                trackColor = MaterialTheme.colorScheme.surfaceVariant
-                            )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Text(
-                                text = "Extracting & configuring models…",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        is DownloadState.Error -> {
-                            Text(
-                                text = state.message,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                                textAlign = TextAlign.Center
-                            )
-
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            Button(
-                                onClick = { viewModel.downloadSherpaModel() },
-                                modifier = Modifier.testTag("retry_model_download_button")
-                            ) {
-                                Text("Retry Download")
-                            }
-                        }
-
-                        is DownloadState.Idle -> {
-                            LinearProgressIndicator(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(8.dp)
-                                    .clip(RoundedCornerShape(4.dp)),
-                                color = MaterialTheme.colorScheme.primary,
-                                trackColor = MaterialTheme.colorScheme.surfaceVariant
-                            )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Text(
-                                text = "Preparing download…",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        is DownloadState.Ready -> {
-                            // Automatically dismissed
-                        }
-                    }
-                }
-            }
-        }
     }
 }

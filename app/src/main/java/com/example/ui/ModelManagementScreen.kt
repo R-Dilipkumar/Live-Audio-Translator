@@ -1,12 +1,13 @@
 package com.example.ui
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,15 +18,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Translate
@@ -34,570 +32,327 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.asr.AsrModelConfig
 import com.example.asr.ModelDownloadState
 import com.example.translate.SupportedLanguage
-import com.example.translate.TranslationPackStatus
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModelManagementScreen(
     viewModel: AudioTranslatorViewModel,
     modifier: Modifier = Modifier
 ) {
-    val asrState by viewModel.asrDownloadState.collectAsStateWithLifecycle()
+    val downloadState by viewModel.asrDownloadState.collectAsStateWithLifecycle()
+    val activeDownloadId by viewModel.activeAsrDownloadId.collectAsStateWithLifecycle()
     val selectedAsrModel by viewModel.selectedAsrModel.collectAsStateWithLifecycle()
-    val availableAsrModels = viewModel.availableAsrModels
+    val readyModelIds by viewModel.readyModelIds.collectAsStateWithLifecycle()
+    val availableStorageMb by viewModel.availableStorageMb.collectAsStateWithLifecycle()
 
-    val availableLanguages = viewModel.targetAvailableLanguages
+    val packLanguages = viewModel.targetAvailableLanguages
     val downloadedLanguages by viewModel.downloadedLanguages.collectAsStateWithLifecycle()
     val downloadingPacks by viewModel.downloadingPacks.collectAsStateWithLifecycle()
-    val availableStorageMb by viewModel.availableStorageMb.collectAsStateWithLifecycle()
-    val readyModelIds by viewModel.readyModelIds.collectAsStateWithLifecycle()
-
-    var selectedSubCategory by remember { mutableIntStateOf(0) }
-    val categories = listOf("All Models", "Speech (ASR)", "Language Packs")
 
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp)
             .testTag("model_management_screen"),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // Storage Overview Card
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("storage_overview_card"),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                ),
-                border = CardDefaults.outlinedCardBorder()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Storage,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = "Device Storage Pre-Flight",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Free space: $availableStorageMb MB (min 150 MB required)",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (availableStorageMb >= 150L) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
-                            )
-                        }
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (availableStorageMb >= 150L) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
-                    ) {
-                        Text(
-                            text = if (availableStorageMb >= 150L) "READY" else "LOW SPACE",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (availableStorageMb >= 150L) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
-                }
-            }
+            Spacer(modifier = Modifier.height(4.dp))
+            StorageSummary(freeMb = availableStorageMb)
         }
 
-        // Subcategory Filter Tabs
         item {
-            TabRow(
-                selectedTabIndex = selectedSubCategory,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .testTag("model_category_tab_row")
-            ) {
-                categories.forEachIndexed { index, title ->
-                    Tab(
-                        selected = selectedSubCategory == index,
-                        onClick = { selectedSubCategory = index },
-                        text = {
-                            Text(
-                                text = title,
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = if (selectedSubCategory == index) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    )
-                }
-            }
-        }
-
-        // ==========================================
-        // SECTION 1: ASR SPEECH RECOGNITION MODELS
-        // ==========================================
-        if (selectedSubCategory == 0 || selectedSubCategory == 1) {
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp, bottom = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Mic,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Speech Recognition (ASR) Models",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-
-            // Categorized ASR Models by Language & Tier
-            val languages = listOf(
-                "Multilingual / Auto-Detect" to availableAsrModels.filter { it.isMultilingual },
-                "Japanese (Anime & Gaming)" to availableAsrModels.filter { it.languageCode == "ja" },
-                "English" to availableAsrModels.filter { it.languageCode == "en" },
-                "Spanish" to availableAsrModels.filter { it.languageCode == "es" },
-                "Chinese (Mandarin)" to availableAsrModels.filter { it.languageCode == "zh" },
-                "Korean" to availableAsrModels.filter { it.languageCode == "ko" }
+            SectionHeader(
+                icon = Icons.Default.Mic,
+                title = "Speech recognition",
+                subtitle = "Pick the language you will listen to. One model is used at a time."
             )
-
-            languages.forEach { (langTitle, models) ->
-                if (models.isNotEmpty()) {
-                    item {
-                        Text(
-                            text = langTitle,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
-                        )
-                    }
-
-                    items(models) { model ->
-                        AsrModelItemCard(
-                            model = model,
-                            isSelected = model.id == selectedAsrModel.id,
-                            isReady = readyModelIds.contains(model.id),
-                            downloadState = if (model.id == selectedAsrModel.id) asrState else ModelDownloadState.NotDownloaded,
-                            onSelect = { viewModel.selectAsrModel(model) },
-                            onDownload = {
-                                viewModel.selectAsrModel(model)
-                                viewModel.downloadAsrModel(model)
-                            },
-                            onDelete = { viewModel.deleteAsrModel(model) }
-                        )
-                    }
-                }
-            }
         }
 
-        // ==========================================
-        // SECTION 2: GOOGLE ML KIT TRANSLATION PACKS
-        // ==========================================
-        if (selectedSubCategory == 0 || selectedSubCategory == 2) {
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 12.dp, bottom = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Translate,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Google ML Kit Offline Language Packs (~30 MB each)",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.secondary
-                    )
-                }
-            }
-
-            items(availableLanguages) { lang ->
-                val isDownloaded = downloadedLanguages.contains(lang.code)
-                val downloadProgress = downloadingPacks[lang.code]
-
-                LanguagePackItemCard(
-                    language = lang,
-                    isDownloaded = isDownloaded,
-                    downloadProgress = downloadProgress,
-                    onDownload = { viewModel.downloadSingleLanguagePack(lang.code) },
-                    onDelete = { viewModel.deleteLanguageModel(lang.code) }
-                )
-            }
+        items(viewModel.availableAsrModels, key = { it.id }) { model ->
+            val isDownloadingThis = activeDownloadId == model.id
+            SpeechModelCard(
+                model = model,
+                isSelected = model.id == selectedAsrModel.id,
+                isInstalled = model.id in readyModelIds,
+                downloadState = if (isDownloadingThis || model.id == selectedAsrModel.id) downloadState else null,
+                isDownloadingThis = isDownloadingThis,
+                anotherDownloadRunning = activeDownloadId != null && !isDownloadingThis,
+                onSelect = { viewModel.selectAsrModel(model) },
+                onDownload = {
+                    viewModel.selectAsrModel(model)
+                    viewModel.downloadAsrModel(model)
+                },
+                onDelete = { viewModel.deleteAsrModel(model) }
+            )
         }
 
         item {
-            Spacer(modifier = Modifier.height(24.dp))
+            SectionHeader(
+                icon = Icons.Default.Translate,
+                title = "Translation packs",
+                subtitle = "Google ML Kit, about 30 MB each. Download the language you listen to and the one you read."
+            )
+        }
+
+        items(packLanguages, key = { it.code }) { lang ->
+            LanguagePackRow(
+                language = lang,
+                isDownloaded = lang.code in downloadedLanguages,
+                downloadProgress = downloadingPacks[lang.code],
+                onDownload = { viewModel.downloadSingleLanguagePack(lang.code) },
+                onDelete = { viewModel.deleteLanguageModel(lang.code) }
+            )
+        }
+
+        item { Spacer(modifier = Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun StorageSummary(freeMb: Long) {
+    val low = freeMb in 1 until 500
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("storage_overview_card")
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Storage,
+                contentDescription = null,
+                tint = if (low) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = if (freeMb > 0) "${formatMb(freeMb)} free on this device" else "Checking free space…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (low) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+            )
         }
     }
 }
 
 @Composable
-private fun AsrModelItemCard(
+private fun SectionHeader(icon: ImageVector, title: String, subtitle: String) {
+    Column(modifier = Modifier.padding(top = 12.dp, bottom = 2.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp, start = 28.dp)
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SpeechModelCard(
     model: AsrModelConfig,
     isSelected: Boolean,
-    isReady: Boolean,
-    downloadState: ModelDownloadState,
+    isInstalled: Boolean,
+    downloadState: ModelDownloadState?,
+    isDownloadingThis: Boolean,
+    anotherDownloadRunning: Boolean,
     onSelect: () -> Unit,
     onDownload: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val isDownloading = isSelected && downloadState is ModelDownloadState.Downloading
-    val isExtracting = isSelected && downloadState is ModelDownloadState.Extracting
-
+    val isActive = isSelected && isInstalled
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onSelect() }
             .testTag("asr_card_${model.id}"),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+            containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
             else MaterialTheme.colorScheme.surface
         ),
-        border = CardDefaults.outlinedCardBorder()
+        border = BorderStroke(
+            width = if (isActive) 1.5.dp else 1.dp,
+            color = if (isActive) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.outlineVariant
+        )
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    RadioButton(
-                        selected = isSelected,
-                        onClick = onSelect,
-                        modifier = Modifier.testTag("radio_asr_${model.id}")
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = model.name,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                            if (model.isMultilingual) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Surface(
-                                    shape = RoundedCornerShape(4.dp),
-                                    color = MaterialTheme.colorScheme.primary
-                                ) {
-                                    Text(
-                                        text = "AUTO-DETECT",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onPrimary,
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                    )
-                                }
-                            }
-                        }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LanguageBadge(text = if (model.isMultilingual) "ALL" else model.languageCode.uppercase())
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = model.description,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 11.sp
+                            text = model.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
                         )
-
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        // Visual Chips: Tier, Download Size, Latency & RAM Profile
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 2.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = if (model.tier == com.example.asr.ModelTier.FAST)
-                                    MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.8f)
-                                else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.8f)
-                            ) {
-                                Text(
-                                    text = model.tier.badge,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (model.tier == com.example.asr.ModelTier.FAST)
-                                        MaterialTheme.colorScheme.onTertiaryContainer
-                                    else MaterialTheme.colorScheme.onSecondaryContainer,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
-                            }
-
-                            val sizeMb = model.totalSizeBytes / (1024L * 1024L)
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                            ) {
-                                Text(
-                                    text = "📦 ${sizeMb} MB",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                                )
-                            }
-
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                            ) {
-                                Text(
-                                    text = model.latencyProfile,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                                )
-                            }
-
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                            ) {
-                                Text(
-                                    text = model.ramProfile,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                                )
-                            }
+                        if (isActive) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Pill(text = "In use", container = MaterialTheme.colorScheme.primary, content = MaterialTheme.colorScheme.onPrimary)
                         }
                     }
-                }
-
-                // Action buttons: Download or Delete
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isReady) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "Installed",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                        IconButton(
-                            onClick = onDelete,
-                            modifier = Modifier.size(36.dp).testTag("delete_asr_${model.id}")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.DeleteOutline,
-                                contentDescription = "Delete Model",
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    } else if (isDownloading || isExtracting) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        Button(
-                            onClick = onDownload,
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.height(34.dp).testTag("download_asr_${model.id}"),
-                            contentPadding = ButtonDefaults.TextButtonContentPadding
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CloudDownload,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Download", style = MaterialTheme.typography.labelSmall)
-                        }
-                    }
+                    Text(
+                        text = model.languages.joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
-            // Error banner if download failed
-            val errorState = downloadState as? ModelDownloadState.Error
-            if (isSelected && errorState != null) {
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp)
-                ) {
+            Text(
+                text = model.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(top = 8.dp)
+            ) {
+                InfoChip("Download ${formatMb(model.totalSizeBytes / (1024L * 1024L))}")
+                InfoChip("~${model.memoryMb} MB memory")
+                if (model.hasPunctuation) InfoChip("Punctuation")
+                if (model.license != "Apache-2.0") InfoChip(model.license)
+            }
+
+            // Status and actions
+            when {
+                isDownloadingThis && downloadState is ModelDownloadState.Downloading -> {
+                    ProgressBlock(
+                        progress = downloadState.progress,
+                        left = "${downloadState.bytesDownloaded / (1024 * 1024)} of ${downloadState.totalBytes / (1024 * 1024)} MB",
+                        right = "${(downloadState.progress * 100).toInt()}%"
+                    )
+                }
+                isDownloadingThis && downloadState is ModelDownloadState.Extracting -> {
+                    ProgressBlock(progress = null, left = "Unpacking…", right = "")
+                }
+                isInstalled -> {
                     Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = Icons.Default.ErrorOutline,
+                            imageVector = Icons.Default.CheckCircle,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
+                            tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = errorState.errorMsg,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
+                            text = "Installed",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f)
                         )
-                    }
-                }
-            }
-
-            // Progress bar if currently downloading
-            val downloadingState = downloadState as? ModelDownloadState.Downloading
-            AnimatedVisibility(visible = isDownloading && downloadingState != null) {
-                if (downloadingState != null) {
-                    Column(modifier = Modifier.padding(top = 8.dp)) {
-                        val percent = (downloadingState.progress * 100).toInt()
-                        LinearProgressIndicator(
-                            progress = { downloadingState.progress },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(6.dp)
-                                .clip(RoundedCornerShape(3.dp))
-                        )
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 2.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        if (!isSelected) {
+                            OutlinedButton(
+                                onClick = onSelect,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.testTag("select_asr_${model.id}")
+                            ) { Text("Use this model") }
+                        }
+                        IconButton(
+                            onClick = onDelete,
+                            modifier = Modifier.testTag("delete_asr_${model.id}")
                         ) {
-                            Text(
-                                text = "${downloadingState.bytesDownloaded / (1024 * 1024)} MB / ${downloadingState.totalBytes / (1024 * 1024)} MB",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = "$percent%",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
+                            Icon(
+                                imageVector = Icons.Default.DeleteOutline,
+                                contentDescription = "Delete ${model.name} model",
+                                tint = MaterialTheme.colorScheme.error
                             )
                         }
                     }
                 }
+                else -> {
+                    Button(
+                        onClick = onDownload,
+                        enabled = !anotherDownloadRunning,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp)
+                            .testTag("download_asr_${model.id}"),
+                        contentPadding = ButtonDefaults.ButtonWithIconContentPadding
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CloudDownload,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (anotherDownloadRunning) "Another download is running" else "Download")
+                    }
+                }
             }
 
-            // Progress bar if currently extracting archive
-            val extractingState = downloadState as? ModelDownloadState.Extracting
-            AnimatedVisibility(visible = isExtracting && extractingState != null) {
-                if (extractingState != null) {
-                    Column(modifier = Modifier.padding(top = 8.dp)) {
-                        val percent = (extractingState.progress * 100).toInt()
-                        LinearProgressIndicator(
-                            progress = { extractingState.progress.coerceIn(0.05f, 1f) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(6.dp)
-                                .clip(RoundedCornerShape(3.dp)),
-                            color = MaterialTheme.colorScheme.tertiary
-                        )
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 2.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Extracting: ${extractingState.currentFile.ifEmpty { "Model Archive..." }}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = "$percent%",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.tertiary
-                            )
-                        }
-                    }
+            if (isSelected && !isDownloadingThis && downloadState is ModelDownloadState.Error) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f))
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ErrorOutline,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = downloadState.errorMsg,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
                 }
             }
         }
@@ -605,139 +360,151 @@ private fun AsrModelItemCard(
 }
 
 @Composable
-private fun LanguagePackItemCard(
+private fun LanguagePackRow(
     language: SupportedLanguage,
     isDownloaded: Boolean,
     downloadProgress: Int?,
     onDownload: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val isDownloading = downloadProgress != null
-
-    Card(
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("lang_pack_${language.code}"),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        border = CardDefaults.outlinedCardBorder()
+            .testTag("lang_pack_${language.code}")
     ) {
-        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(text = language.flagEmoji, fontSize = 24.sp)
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(text = language.flagEmoji, fontSize = 22.sp)
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = language.displayName,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
+                )
+                when {
+                    downloadProgress != null -> CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.dp
+                    )
+                    isDownloaded -> {
                         Text(
-                            text = language.displayName,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
+                            text = "Installed",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary
                         )
-                        Text(
-                            text = "Language code: ${language.code} • ~30 MB",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isDownloaded) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.secondary,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "Ready",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.secondary,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
                         IconButton(
                             onClick = onDelete,
-                            modifier = Modifier.size(36.dp).testTag("delete_lang_${language.code}")
+                            modifier = Modifier.testTag("delete_lang_${language.code}")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.DeleteOutline,
-                                contentDescription = "Delete Pack",
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(18.dp)
+                                contentDescription = "Delete ${language.displayName} pack",
+                                tint = MaterialTheme.colorScheme.error
                             )
-                        }
-                    } else if (isDownloading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.secondary
-                        )
-                    } else {
-                        OutlinedButton(
-                            onClick = onDownload,
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.height(34.dp).testTag("download_lang_${language.code}"),
-                            contentPadding = ButtonDefaults.TextButtonContentPadding
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CloudDownload,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Download", style = MaterialTheme.typography.labelSmall)
                         }
                     }
+                    else -> OutlinedButton(
+                        onClick = onDownload,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.testTag("download_lang_${language.code}")
+                    ) { Text("Download") }
                 }
             }
-
-            AnimatedVisibility(visible = isDownloading) {
-                val progress = ((downloadProgress ?: 0) / 100f).coerceIn(0f, 1f)
-                Column(modifier = Modifier.padding(top = 6.dp)) {
-                    LinearProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(5.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = MaterialTheme.colorScheme.secondary
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "Downloading pack (~30 MB)...",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "${downloadProgress ?: 0}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.secondary
-                        )
-                    }
-                }
+            if (downloadProgress != null) {
+                LinearProgressIndicator(
+                    progress = { (downloadProgress / 100f).coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp, bottom = 2.dp)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                )
             }
         }
     }
 }
+
+@Composable
+private fun LanguageBadge(text: String) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.secondaryContainer),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+private fun Pill(text: String, container: Color, content: Color) {
+    Surface(shape = RoundedCornerShape(50), color = container) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = content,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+        )
+    }
+}
+
+@Composable
+private fun InfoChip(text: String) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+        )
+    }
+}
+
+@Composable
+private fun ProgressBlock(progress: Float?, left: String, right: String) {
+    Column(modifier = Modifier.padding(top = 10.dp)) {
+        if (progress != null) {
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+            )
+        } else {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(left, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(right, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+private fun formatMb(mb: Long): String =
+    if (mb >= 1024) String.format(java.util.Locale.US, "%.1f GB", mb / 1024f) else "$mb MB"

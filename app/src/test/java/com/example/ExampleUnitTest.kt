@@ -180,10 +180,13 @@ class ExampleUnitTest {
 
     @Test
     fun testZipSlipPathContainmentCheck() {
-        val targetDir = java.io.File("/data/user/0/com.example/models/model1")
-        val safeCanonicalPath = java.io.File(targetDir, "sub/file.onnx").path
+        // Platform-neutral paths: canonicalPath adds a drive letter on Windows, so every path
+        // compared here is built from the same base and canonicalized the same way.
+        val modelsDir = java.io.File(System.getProperty("java.io.tmpdir"), "zip_slip_test/models")
+        val targetDir = java.io.File(modelsDir, "model1")
+        val safeCanonicalPath = java.io.File(targetDir, "sub/file.onnx").canonicalPath
         val unsafeEscapePath = java.io.File(targetDir, "../evil.sh").canonicalPath
-        val prefixTrapPath = "/data/user/0/com.example/models/model1_fake/evil.onnx"
+        val prefixTrapPath = java.io.File(modelsDir, "model1_fake/evil.onnx").canonicalPath
 
         val targetCanonicalDirPath = targetDir.canonicalPath + java.io.File.separator
 
