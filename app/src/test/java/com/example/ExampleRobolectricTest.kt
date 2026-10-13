@@ -46,12 +46,12 @@ class ExampleRobolectricTest {
         val modelManager = com.example.asr.ModelManager(context)
         val speechEngine = com.example.asr.SpeechRecognizerEngine(context, modelManager)
 
-        val ready = speechEngine.initEngine()
+        val ready = kotlinx.coroutines.runBlocking { speechEngine.initEngine() }
         assertEquals(false, ready)
         val state = speechEngine.engineState.value
         org.junit.Assert.assertTrue(state is com.example.asr.RecognizerState.Error)
         assertEquals(
-            "ASR Model not initialized. Please install model in Manage Models.",
+            "ASR model not installed: ${modelManager.selectedModel.value.name}. Please install it in Manage Models.",
             (state as com.example.asr.RecognizerState.Error).message
         )
     }

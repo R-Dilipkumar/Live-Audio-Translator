@@ -5,6 +5,9 @@ import android.util.Log
 import com.example.service.NotificationHelper
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
+import com.google.mlkit.nl.languageid.LanguageIdentification
+import com.google.mlkit.nl.languageid.LanguageIdentificationOptions
+import com.google.mlkit.nl.languageid.LanguageIdentifier
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.translate.Translation
@@ -25,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 
 data class SupportedLanguage(
@@ -42,7 +46,9 @@ data class TranslationResult(
     val detectedSourceLanguage: String? = null,
     val isFinal: Boolean = true,
     val utteranceId: Long = 0L,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    // TRANSLATED unless translatedText is a status message (pack missing, failed, ...)
+    val status: TranslationStatus = TranslationStatus.TRANSLATED
 )
 
 sealed class TranslationPackStatus {
@@ -58,6 +64,12 @@ sealed class TranslationPackStatus {
 }
 
 class LocalTranslatorEngine(private val context: Context) {
+
+    companion object {
+        // A translation that takes longer than this is abandoned and the offline fallback is used.
+        const val TRANSLATE_TIMEOUT_MS = 5_000L
+        const val LANGUAGE_ID_TIMEOUT_MS = 1_000L
+    }
 
     private val TAG = "LocalTranslatorEngine"
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -88,7 +100,8 @@ class LocalTranslatorEngine(private val context: Context) {
     // Language list excluding Auto-Detect for target language selection
     val targetAvailableLanguages = availableLanguages.filter { !it.isAutoDetect }
 
-    var confidenceThreshold: Float = 0.55f
+    // Minimum language-ID confidence for auto-detect to switch the source language.
+    @Volatile var confidenceThreshold: Float = 0.55f
 
     private val _sourceLanguage = MutableStateFlow(availableLanguages[0]) // Auto-Detect by default
     val sourceLanguage: StateFlow<SupportedLanguage> = _sourceLanguage.asStateFlow()
@@ -148,6 +161,31 @@ class LocalTranslatorEngine(private val context: Context) {
 
     private val activeDownloadKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
+    // True once _downloadedLanguages has been read from ML Kit at least once.
+    @Volatile private var downloadedLanguagesLoaded = false
+
+    private val languageDetectionGate = LanguageDetectionGate()
+
+    // Low client-side threshold: all candidates are returned and confidenceThreshold is applied
+    // per call, so changing the setting takes effect without rebuilding the client.
+    private val languageIdentifier: LanguageIdentifier? by lazy {
+        try {
+            LanguageIdentification.getClient(
+                LanguageIdentificationOptions.Builder().setConfidenceThreshold(0.01f).build()
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Language ID unavailable: ${e.message}")
+            null
+        }
+    }
+
+    // All translation requests go through this queue: one consumer, in order.
+    private val translationQueue = TranslationQueue(
+        scope = scope,
+        process = { request -> processTranslation(request) },
+        emit = { result -> emitTranslation(result) }
+    )
+
     init {
         scope.launch {
             refreshDownloadedLanguages()
@@ -161,6 +199,7 @@ class LocalTranslatorEngine(private val context: Context) {
             val models = mm.getDownloadedModels(TranslateRemoteModel::class.java).await()
             val codes = models.map { it.language }.toSet()
             _downloadedLanguages.value = codes
+            downloadedLanguagesLoaded = true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to load downloaded models: ${e.message}")
         }
@@ -483,118 +522,115 @@ class LocalTranslatorEngine(private val context: Context) {
     }
 
     /**
-     * Submits a translation request using the minimal ML Kit path required by the app.
+     * Queues a translation request. Requests are translated one at a time, in order; only the
+     * newest partial is kept, and a partial is dropped once a final for its utterance is queued.
      */
     fun translateText(originalText: String, isFinal: Boolean = true, utteranceId: Long = 0L) {
         val trimmed = originalText.trim()
         if (trimmed.isEmpty()) return
-        scope.launch {
-            processTranslationInternal(trimmed, isFinal, utteranceId)
-        }
+        translationQueue.submit(TranslationRequest(trimmed, isFinal, utteranceId))
     }
 
-    private suspend fun processTranslationInternal(trimmed: String, isFinal: Boolean, utteranceId: Long) {
+    /**
+     * Identifies the language of [text] with ML Kit Language ID. Returns the best language whose
+     * confidence reaches [confidenceThreshold], else the last confidently detected language,
+     * else null.
+     */
+    private suspend fun detectSourceLanguage(text: String): String? {
+        val candidates = try {
+            val identifier = languageIdentifier
+            if (identifier == null) {
+                emptyList()
+            } else {
+                withTimeoutOrNull(LANGUAGE_ID_TIMEOUT_MS) {
+                    identifier.identifyPossibleLanguages(text).await()
+                }.orEmpty().mapNotNull { identified ->
+                    val code = toTranslateLanguage(identified.languageTag) ?: return@mapNotNull null
+                    code to identified.confidence
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Language identification failed: ${e.message}")
+            emptyList()
+        }
+        return languageDetectionGate.resolve(candidates, confidenceThreshold)
+    }
+
+    // Maps an ML Kit Language ID tag to a translatable language code. Romanized variants
+    // (e.g. "ja-Latn") and "und" (undetermined) are not usable as a translation source.
+    private fun toTranslateLanguage(tag: String): String? {
+        if (tag == "und" || tag.contains("-Latn", ignoreCase = true)) return null
+        return TranslateLanguage.fromLanguageTag(tag.substringBefore('-'))
+    }
+
+    private fun languageName(code: String): String =
+        availableLanguages.find { it.code == code }?.displayName ?: code
+
+    /**
+     * Checks the pack status from the cached set of downloaded languages. The cache is refreshed
+     * on language change, after downloads and after deletes, not once per translation.
+     */
+    private suspend fun hasRequiredPacks(srcCode: String, tgtCode: String): Boolean {
+        if (!downloadedLanguagesLoaded) refreshDownloadedLanguages()
+        val downloaded = _downloadedLanguages.value
+        return getRequiredLanguageCodes(srcCode, tgtCode).all { it in downloaded }
+    }
+
+    private suspend fun processTranslation(request: TranslationRequest): TranslationResult {
+        val text = request.text
         val srcLang = _sourceLanguage.value
         val tgtCode = _targetLanguage.value.code
-        val detectedCode = if (srcLang.isAutoDetect) {
-            _lastDetectedLanguage.value ?: TranslateLanguage.ENGLISH
-        } else {
-            srcLang.code
+
+        fun result(translated: String, status: TranslationStatus, srcCode: String, detectedName: String?) =
+            TranslationResult(
+                originalText = text,
+                translatedText = translated,
+                sourceLangCode = srcCode,
+                targetLangCode = tgtCode,
+                detectedSourceLanguage = detectedName,
+                isFinal = request.isFinal,
+                utteranceId = request.utteranceId,
+                status = status
+            )
+
+        val detectedCode = if (srcLang.isAutoDetect) detectSourceLanguage(text) else srcLang.code
+        if (detectedCode == null) {
+            return result("Detecting language…", TranslationStatus.LANGUAGE_UNKNOWN, "auto", null)
         }
         _lastDetectedLanguage.value = detectedCode
 
-        val detectedName = availableLanguages.find { it.code == detectedCode }?.displayName ?: detectedCode
+        val detectedName = languageName(detectedCode)
         val srcCodeForEmission = if (srcLang.isAutoDetect) "auto ($detectedCode)" else detectedCode
 
         if (detectedCode == tgtCode) {
-            emitTranslation(
-                TranslationResult(
-                    originalText = trimmed,
-                    translatedText = trimmed,
-                    sourceLangCode = srcCodeForEmission,
-                    targetLangCode = tgtCode,
-                    detectedSourceLanguage = detectedName,
-                    isFinal = isFinal,
-                    utteranceId = utteranceId
-                )
-            )
-            return
+            return result(text, TranslationStatus.SAME_LANGUAGE, srcCodeForEmission, detectedName)
         }
 
-        if (!areRequiredModelsDownloaded(detectedCode, tgtCode)) {
+        if (!hasRequiredPacks(detectedCode, tgtCode)) {
             _isModelMissing.value = true
-            emitTranslation(
-                TranslationResult(
-                    originalText = trimmed,
-                    translatedText = trimmed,
-                    sourceLangCode = srcCodeForEmission,
-                    targetLangCode = tgtCode,
-                    detectedSourceLanguage = detectedName,
-                    isFinal = isFinal,
-                    utteranceId = utteranceId
-                )
-            )
-            return
+            val message = "Language pack not downloaded ($detectedName → ${languageName(tgtCode)})"
+            return result(message, TranslationStatus.PACK_MISSING, srcCodeForEmission, detectedName)
         }
 
         _isModelMissing.value = false
         val key = "${detectedCode}_$tgtCode"
-        val translatorToUse = synchronized(cacheLock) { translatorCache[key] } ?: getOrCreateTranslator(detectedCode, tgtCode)
+        val translator = synchronized(cacheLock) { translatorCache[key] } ?: getOrCreateTranslator(detectedCode, tgtCode)
 
-        if (translatorToUse != null) {
-            performTranslation(translatorToUse, trimmed, srcCodeForEmission, tgtCode, detectedName, isFinal, utteranceId)
-        } else {
-            emitTranslation(
-                TranslationResult(
-                    originalText = trimmed,
-                    translatedText = trimmed,
-                    sourceLangCode = srcCodeForEmission,
-                    targetLangCode = tgtCode,
-                    detectedSourceLanguage = detectedName,
-                    isFinal = isFinal,
-                    utteranceId = utteranceId
-                )
-            )
+        val (translated, status) = translateWithFallback(
+            timeoutMs = TRANSLATE_TIMEOUT_MS,
+            translate = {
+                translator?.translate(text)?.await() ?: throw IllegalStateException("No translator for $key")
+            },
+            fallback = {
+                fallbackOfflineTranslate(text, detectedCode, tgtCode).takeIf { it != text }
+            }
+        )
+        if (status != TranslationStatus.TRANSLATED) {
+            Log.w(TAG, "ML Kit translation failed or timed out (limit ${TRANSLATE_TIMEOUT_MS}ms, $key); status=$status")
         }
-    }
-
-    private suspend fun performTranslation(
-        translator: Translator,
-        text: String,
-        srcCode: String,
-        tgtCode: String,
-        detectedLang: String?,
-        isFinal: Boolean,
-        utteranceId: Long
-    ) {
-        try {
-            val translated = translator.translate(text).await()
-            emitTranslation(
-                TranslationResult(
-                    originalText = text,
-                    translatedText = translated,
-                    sourceLangCode = srcCode,
-                    targetLangCode = tgtCode,
-                    detectedSourceLanguage = detectedLang,
-                    isFinal = isFinal,
-                    utteranceId = utteranceId
-                )
-            )
-        } catch (error: Exception) {
-            Log.w(TAG, "ML Kit translation failed (${error.localizedMessage}), using offline fallback")
-            val fallbackText = fallbackOfflineTranslate(text, srcCode, tgtCode)
-            emitTranslation(
-                TranslationResult(
-                    originalText = text,
-                    translatedText = fallbackText,
-                    sourceLangCode = srcCode,
-                    targetLangCode = tgtCode,
-                    detectedSourceLanguage = detectedLang,
-                    isFinal = isFinal,
-                    utteranceId = utteranceId
-                )
-            )
-        }
+        return result(translated ?: "Translation unavailable", status, srcCodeForEmission, detectedName)
     }
 
     /**
@@ -685,9 +721,10 @@ class LocalTranslatorEngine(private val context: Context) {
 
     private val translationLock = Any()
 
+    // Called only by the translation queue's single consumer, so results are emitted in order.
     private suspend fun emitTranslation(result: TranslationResult) {
         synchronized(translationLock) {
-            if (result.isFinal) {
+            if (result.isFinal && result.status.isTranslation) {
                 val currentList = _recentTranslations.value.toMutableList()
                 currentList.add(result)
                 if (currentList.size > 20) {
@@ -730,6 +767,7 @@ class LocalTranslatorEngine(private val context: Context) {
             scope.cancel()
             activeTranslator?.close()
             activeTranslator = null
+            languageIdentifier?.close()
             synchronized(cacheLock) {
                 translatorCache.values.forEach { 
                     try { it.close() } catch (_: Exception) {}

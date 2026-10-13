@@ -19,6 +19,7 @@ import com.example.data.TranscriptEntity
 import com.example.overlay.FloatingSubtitleService
 import com.example.service.AudioCaptureService
 import com.example.translate.LocalTranslatorEngine
+import com.example.translate.SubtitleOrderGate
 import com.example.translate.SupportedLanguage
 import com.example.translate.TranslationPackStatus
 import kotlinx.coroutines.Dispatchers
@@ -49,24 +50,41 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
 
     // ASR model state
     val asrDownloadState: StateFlow<ModelDownloadState> = modelManager.downloadState
-    val sherpaDownloadState: StateFlow<DownloadState> = modelManager.sherpaDownloadState
+    // First-launch download progress (onboarding dialog)
+    val setupDownloadState: StateFlow<DownloadState> = modelManager.setupDownloadState
     val selectedAsrModel: StateFlow<AsrModelConfig> = modelManager.selectedModel
     val availableAsrModels: List<AsrModelConfig> = modelManager.availableModels
 
-    fun isSherpaModelReady(): Boolean = modelManager.areSherpaFilesPresent()
+    /**
+     * Cold-launch check: if the selected model is installed, load it. If no model is installed
+     * at all, download the selected one (first launch). If other models are installed but not the
+     * selected one, do nothing; the user picks or downloads one in Manage Models.
+     */
+    fun prepareAsrOnLaunch() {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (modelManager.isSelectedModelReady()) {
+                speechEngine.initEngine()
+            } else if (!modelManager.hasAnyModelInstalled()) {
+                downloadInitialAsrModel()
+            }
+        }
+    }
 
-    fun downloadSherpaModel(remoteUrl: String = ModelManager.DEFAULT_SHERPA_DOWNLOAD_URL) {
+    /** Downloads the selected model with first-launch progress, then loads it. */
+    fun downloadInitialAsrModel() {
         viewModelScope.launch {
-            modelManager.downloadSherpaModel(remoteUrl)
+            modelManager.downloadModel(modelManager.selectedModel.value, reportSetupProgress = true)
+            initializeSpeechRecognizer()
         }
     }
 
     fun initializeSpeechRecognizer() {
-        if (!isSherpaModelReady()) {
-            Log.w("AudioTranslatorViewModel", "Cannot initialize speech recognizer: model files missing or incomplete (< 1MB)")
-            return
-        }
         viewModelScope.launch(Dispatchers.IO) {
+            if (!modelManager.isSelectedModelReady()) {
+                Log.w("AudioTranslatorViewModel", "Cannot initialize speech recognizer: selected model ${modelManager.selectedModel.value.id} is not installed")
+                return@launch
+            }
+            // Single-flight; a no-op if this model is already loaded or a capture is running.
             speechEngine.initEngine()
         }
     }
@@ -145,6 +163,10 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    // Rejects translation results that are older than what is shown, or a partial arriving
+    // after the final of the same utterance.
+    private val subtitleOrderGate = SubtitleOrderGate()
+
     // Persisted transcript history from Room (strictly validated to prevent non-speech status items)
     val transcriptHistory: StateFlow<List<TranscriptEntity>> = transcriptDao.getAllTranscripts()
         .map { list ->
@@ -157,7 +179,7 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
 
     init {
         // Hydrate latest translation if service has already processed speech before ViewModel creation
-        translatorEngine.latestTranslation.value?.let { initial ->
+        translatorEngine.latestTranslation.value?.takeIf { subtitleOrderGate.accept(it) }?.let { initial ->
             if (SpeechValidator.isGenuineSpeech(initial.originalText) && speechEngine.isConfirmedAsrEvent(initial.originalText)) {
                 _currentOriginalSpeech.value = initial.originalText
             }
@@ -201,7 +223,7 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         // Pure speech validation ensures status strings never pollute display states.
         viewModelScope.launch {
             translatorEngine.translationFlow.collect { result ->
-                if (SpeechValidator.isGenuineSpeech(result.originalText)) {
+                if (SpeechValidator.isGenuineSpeech(result.originalText) && subtitleOrderGate.accept(result)) {
                     _currentOriginalSpeech.value = result.originalText
                     if (SpeechValidator.isGenuineSpeech(result.translatedText)) {
                         _currentTranslatedSpeech.value = result.translatedText
@@ -310,11 +332,17 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     fun deleteAsrModel(model: AsrModelConfig) {
         viewModelScope.launch {
             modelManager.deleteModel(model)
+            speechEngine.onModelDeleted(model.id)
+            // deleteModel may have switched the selection to another installed model
+            initializeSpeechRecognizer()
         }
     }
 
     fun selectAsrModel(model: AsrModelConfig) {
         modelManager.selectModel(model)
+        // Load the new selection now if it is installed (no-op during capture; it then
+        // takes effect on the next start).
+        initializeSpeechRecognizer()
     }
 
     fun downloadTranslationModels() {

@@ -61,7 +61,11 @@ data class AsrModelConfig(
     val category: String = "Monolingual",
     val tier: ModelTier = ModelTier.FAST,
     val latencyProfile: String = "~100ms",
-    val ramProfile: String = "~50MB RAM"
+    val ramProfile: String = "~50MB RAM",
+    // Sherpa-ONNX transducer type: "zipformer" (icefall pruned_transducer_stateless7_streaming exports)
+    // or "zipformer2" (newer icefall zipformer exports). Empty means sherpa-onnx reads the
+    // "model_type" entry from the encoder's ONNX metadata, which every icefall export carries.
+    val modelType: String = ""
 )
 
 sealed class ModelDownloadState {
@@ -135,7 +139,8 @@ class ModelManager(private val context: Context) {
             category = "English",
             tier = ModelTier.FAST,
             latencyProfile = "⚡ ~85ms",
-            ramProfile = "💾 ~40MB RAM"
+            ramProfile = "💾 ~40MB RAM",
+            modelType = "zipformer"
         ),
 
         // ==========================================
@@ -156,7 +161,8 @@ class ModelManager(private val context: Context) {
             category = "English",
             tier = ModelTier.CINEMATIC,
             latencyProfile = "🎯 ~190ms",
-            ramProfile = "💾 ~90MB RAM"
+            ramProfile = "💾 ~90MB RAM",
+            modelType = "zipformer2"
         ),
 
         // ==========================================
@@ -177,7 +183,8 @@ class ModelManager(private val context: Context) {
             category = "Chinese",
             tier = ModelTier.FAST,
             latencyProfile = "⚡ ~90ms",
-            ramProfile = "💾 ~38MB RAM"
+            ramProfile = "💾 ~38MB RAM",
+            modelType = "zipformer"
         ),
 
         // ==========================================
@@ -198,7 +205,8 @@ class ModelManager(private val context: Context) {
             category = "Bilingual (ZH/EN)",
             tier = ModelTier.CINEMATIC,
             latencyProfile = "🎯 ~200ms",
-            ramProfile = "💾 ~95MB RAM"
+            ramProfile = "💾 ~95MB RAM",
+            modelType = "zipformer"
         ),
 
         // ==========================================
@@ -219,7 +227,8 @@ class ModelManager(private val context: Context) {
             category = "French",
             tier = ModelTier.FAST,
             latencyProfile = "⚡ ~110ms",
-            ramProfile = "💾 ~55MB RAM"
+            ramProfile = "💾 ~55MB RAM",
+            modelType = "zipformer"
         ),
 
         // ==========================================
@@ -266,21 +275,32 @@ class ModelManager(private val context: Context) {
     )
 
     companion object {
-        const val DEFAULT_SHERPA_DOWNLOAD_URL = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2"
+        // Model installed on first launch (~42 MB). This is the model the old flat
+        // models/sherpa-onnx folder was always downloaded from.
+        const val DEFAULT_MODEL_ID = "zipformer_en_fast"
+
+        // Old storage layout: one flat folder shared by every model. Only read by the migration.
+        const val LEGACY_FLAT_DIR = "models/sherpa-onnx"
+
+        private const val PREFS_NAME = "asr_model_prefs"
+        private const val KEY_SELECTED_MODEL_ID = "selected_model_id"
     }
 
-    private val _selectedModel = MutableStateFlow<AsrModelConfig>(availableModels[0])
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val selectionLock = Any()
+
+    private val _selectedModel = MutableStateFlow(
+        availableModels.firstOrNull { it.id == prefs.getString(KEY_SELECTED_MODEL_ID, null) }
+            ?: availableModels.first { it.id == DEFAULT_MODEL_ID }
+    )
     val selectedModel: StateFlow<AsrModelConfig> = _selectedModel.asStateFlow()
 
     private val _downloadState = MutableStateFlow<ModelDownloadState>(ModelDownloadState.NotDownloaded)
     val downloadState: StateFlow<ModelDownloadState> = _downloadState.asStateFlow()
 
-    private val _sherpaDownloadState = MutableStateFlow<DownloadState>(
-        if (areSherpaFilesPresent()) DownloadState.Ready else DownloadState.Idle
-    )
-    val sherpaDownloadState: StateFlow<DownloadState> = _sherpaDownloadState.asStateFlow()
-
-    val downloadStateFlow: StateFlow<DownloadState> get() = sherpaDownloadState
+    // Progress of the first-launch download (shown in the onboarding dialog, with speed).
+    private val _setupDownloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
+    val setupDownloadState: StateFlow<DownloadState> = _setupDownloadState.asStateFlow()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -290,16 +310,98 @@ class ModelManager(private val context: Context) {
     private val _readyModelIds = MutableStateFlow<Set<String>>(emptySet())
     val readyModelIds: StateFlow<Set<String>> = _readyModelIds.asStateFlow()
 
-    @Volatile private var hasInitialScanCompleted = false
+    @Volatile private var legacyMigrationDone = false
+    private val migrationLock = Any()
 
     init {
         scope.launch {
+            migrateLegacyFlatInstall()
             cleanupOrphanedTempFiles()
             refreshAvailableStorage()
-            refreshReadyModels()
-            checkSherpaModelStatus()
-            hasInitialScanCompleted = true
+            val ready = refreshReadyModels()
+            chooseInitialSelectionIfUnset(ready)
         }
+    }
+
+    /**
+     * Moves an install from the old flat models/sherpa-onnx folder into the per-model folder
+     * models/<model id>/, so every model lives in exactly one place.
+     *
+     * The flat folder was only ever filled from the English 20M model URL, so a complete install
+     * there is treated as [DEFAULT_MODEL_ID] after a tokens.txt sanity check (that model uses a
+     * 500-entry BPE vocabulary). Anything that fails the check is deleted, not guessed at.
+     * Runs once per process; safe to call from any thread.
+     */
+    fun migrateLegacyFlatInstall() {
+        if (legacyMigrationDone) return
+        synchronized(migrationLock) {
+            if (legacyMigrationDone) return
+            try {
+                val legacyDir = File(context.filesDir, LEGACY_FLAT_DIR)
+                if (legacyDir.exists()) {
+                    val target = availableModels.first { it.id == DEFAULT_MODEL_ID }
+                    val targetDir = getModelDirectory(target)
+                    when {
+                        resolveFilesInModelDir(target) != null -> {
+                            Log.i(TAG, "Legacy flat model folder duplicates ${target.id}; deleting it")
+                            legacyDir.deleteRecursively()
+                        }
+                        isLegacyInstallOfDefaultModel(legacyDir) -> {
+                            if (targetDir.exists()) targetDir.deleteRecursively()
+                            val moved = legacyDir.renameTo(targetDir) ||
+                                (legacyDir.copyRecursively(targetDir, overwrite = true) && legacyDir.deleteRecursively())
+                            Log.i(TAG, "Migrated legacy flat model folder into ${targetDir.name}: $moved")
+                            if (!moved) {
+                                targetDir.deleteRecursively()
+                                legacyDir.deleteRecursively()
+                            }
+                        }
+                        else -> {
+                            Log.w(TAG, "Legacy flat model folder could not be identified; deleting it")
+                            legacyDir.deleteRecursively()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Legacy model migration failed: ${e.message}")
+            } finally {
+                legacyMigrationDone = true
+            }
+        }
+    }
+
+    private fun isLegacyInstallOfDefaultModel(dir: File): Boolean {
+        val encoder = findFileByKeyword(dir, "encoder")
+        val decoder = findFileByKeyword(dir, "decoder")
+        val joiner = findFileByKeyword(dir, "joiner")
+        val tokens = findFileByKeyword(dir, "tokens")
+        if (!hasUsableModelFile(encoder, 1_000_000L) ||
+            !hasUsableModelFile(decoder, 100_000L) ||
+            !hasUsableModelFile(joiner, 10_000L) ||
+            !hasUsableModelFile(tokens, 10L)
+        ) return false
+        val tokenCount = try {
+            tokens!!.useLines { lines -> lines.count { it.isNotBlank() } }
+        } catch (_: Exception) {
+            return false
+        }
+        return tokenCount in 400..600
+    }
+
+    /**
+     * On the first run after this change there is no saved selection. Prefer the default model if
+     * it is installed, otherwise any installed model, so an existing install keeps working.
+     */
+    private fun chooseInitialSelectionIfUnset(ready: Set<String>) {
+        synchronized(selectionLock) {
+            if (prefs.contains(KEY_SELECTED_MODEL_ID)) return
+            val pick = availableModels.firstOrNull { it.id == DEFAULT_MODEL_ID && it.id in ready }
+                ?: availableModels.firstOrNull { it.id in ready }
+                ?: return
+            _selectedModel.value = pick
+            prefs.edit().putString(KEY_SELECTED_MODEL_ID, pick.id).apply()
+        }
+        checkCurrentModelStatus()
     }
 
     suspend fun refreshAvailableStorage(): Long = withContext(Dispatchers.IO) {
@@ -354,15 +456,6 @@ class ModelManager(private val context: Context) {
                     file.delete()
                 }
             }
-            // Purge incomplete stub onnx files (< 50KB) that would trigger native JNI SIGABRT
-            val sherpaDir = File(context.filesDir, "models/sherpa-onnx")
-            if (sherpaDir.exists() && !areSherpaFilesPresent()) {
-                sherpaDir.listFiles()?.forEach { file ->
-                    if (file.isFile && file.name.endsWith(".onnx") && file.length() < 50_000L) {
-                        file.delete()
-                    }
-                }
-            }
         } catch (_: Exception) {}
     }
 
@@ -371,14 +464,21 @@ class ModelManager(private val context: Context) {
             if (tempFile != null && tempFile.exists()) {
                 tempFile.delete()
             }
-            if (targetDir != null && targetDir.exists() && !isModelReady(model)) {
+            if (targetDir != null && targetDir.exists() && !checkModelFilesOnDisk(model)) {
                 targetDir.deleteRecursively()
             }
         } catch (_: Exception) {}
     }
 
+    /**
+     * Selects [model] as the one the speech engine loads, and remembers it across restarts.
+     * The engine loads exactly this model; it never falls back to another installed one.
+     */
     fun selectModel(model: AsrModelConfig) {
-        _selectedModel.value = model
+        synchronized(selectionLock) {
+            _selectedModel.value = model
+            prefs.edit().putString(KEY_SELECTED_MODEL_ID, model.id).apply()
+        }
         checkCurrentModelStatus()
     }
 
@@ -394,133 +494,8 @@ class ModelManager(private val context: Context) {
         return File(getModelsDirectory(), model.id)
     }
 
-    fun getSherpaModelDirectory(): File {
-        val dir = File(context.filesDir, "models/sherpa-onnx")
-        if (!dir.exists()) {
-            dir.mkdirs()
-        }
-        return dir
-    }
-
-    /**
-     * Traverses all subdirectories under targetDir (context.filesDir/models/sherpa-onnx/),
-     * locates the 4 core model files (encoder, decoder, joiner, tokens),
-     * moves them directly into root targetDir with normalized names:
-     * - encoder.int8.onnx
-     * - decoder.int8.onnx
-     * - joiner.int8.onnx
-     * - tokens.txt
-     * and deletes leftover empty or nested subfolders.
-     */
-    fun flattenSherpaModelDirectory(baseDir: File = getSherpaModelDirectory()): Boolean {
-        if (!baseDir.exists()) return false
-
-        val allFiles = baseDir.walkTopDown().filter { it.isFile }.toList()
-
-        val encoder = allFiles.firstOrNull { it.name.contains("encoder", ignoreCase = true) && it.name.endsWith(".onnx") }
-        val decoder = allFiles.firstOrNull { it.name.contains("decoder", ignoreCase = true) && it.name.endsWith(".onnx") }
-        val joiner = allFiles.firstOrNull { it.name.contains("joiner", ignoreCase = true) && it.name.endsWith(".onnx") }
-        val tokens = allFiles.firstOrNull { it.name.contains("tokens", ignoreCase = true) && it.name.endsWith(".txt") }
-
-        if (encoder == null || decoder == null || joiner == null || tokens == null) {
-            return false
-        }
-
-        val destEncoder = File(baseDir, "encoder.int8.onnx")
-        val destDecoder = File(baseDir, "decoder.int8.onnx")
-        val destJoiner = File(baseDir, "joiner.int8.onnx")
-        val destTokens = File(baseDir, "tokens.txt")
-
-        if (encoder.canonicalPath != destEncoder.canonicalPath) {
-            val moved = encoder.renameTo(destEncoder)
-            if (!moved) {
-                encoder.copyTo(destEncoder, overwrite = true)
-                encoder.delete()
-            }
-        }
-        if (decoder.canonicalPath != destDecoder.canonicalPath) {
-            val moved = decoder.renameTo(destDecoder)
-            if (!moved) {
-                decoder.copyTo(destDecoder, overwrite = true)
-                decoder.delete()
-            }
-        }
-        if (joiner.canonicalPath != destJoiner.canonicalPath) {
-            val moved = joiner.renameTo(destJoiner)
-            if (!moved) {
-                joiner.copyTo(destJoiner, overwrite = true)
-                joiner.delete()
-            }
-        }
-        if (tokens.canonicalPath != destTokens.canonicalPath) {
-            val moved = tokens.renameTo(destTokens)
-            if (!moved) {
-                tokens.copyTo(destTokens, overwrite = true)
-                tokens.delete()
-            }
-        }
-
-        // Clean up nested directories leaving only the flat models
-        baseDir.listFiles()?.filter { it.isDirectory }?.forEach { it.deleteRecursively() }
-
-        return areSherpaFilesPresent()
-    }
-
     private fun hasUsableModelFile(file: File?, minBytes: Long): Boolean {
         return file != null && file.exists() && file.length() >= minBytes
-    }
-
-    /**
-     * Checks if the required normalized files exist directly in context.filesDir/models/sherpa-onnx/.
-     * The validation is intentionally permissive: valid ONNX files can vary slightly, and overly strict
-     * size thresholds cause false negatives even after a successful extraction.
-     */
-    fun areSherpaFilesPresent(): Boolean {
-        val modelDir = File(context.filesDir, "models/sherpa-onnx")
-        if (!modelDir.exists() || !modelDir.isDirectory) return false
-
-        val encoder = File(modelDir, "encoder.int8.onnx")
-        val decoder = File(modelDir, "decoder.int8.onnx")
-        val joiner = File(modelDir, "joiner.int8.onnx")
-        val tokens = File(modelDir, "tokens.txt")
-
-        val encoderValid = hasUsableModelFile(encoder, 1_000_000L)
-        val decoderValid = hasUsableModelFile(decoder, 100_000L)
-        val joinerValid = hasUsableModelFile(joiner, 10_000L)
-        val tokensValid = hasUsableModelFile(tokens, 10L)
-
-        if (encoderValid && decoderValid && joinerValid && tokensValid) {
-            return true
-        }
-
-        // If unflattened nested files exist, attempt a flattening pass.
-        val hasNestedFiles = modelDir.walkTopDown().any { file ->
-            file.isFile && file.parentFile != modelDir && (file.name.endsWith(".onnx", ignoreCase = true) || file.name.endsWith(".txt", ignoreCase = true))
-        }
-        if (hasNestedFiles) {
-            val allFiles = modelDir.walkTopDown().filter { it.isFile }.toList()
-            val enc = allFiles.firstOrNull { it.name.contains("encoder", ignoreCase = true) && it.name.endsWith(".onnx") }
-            val dec = allFiles.firstOrNull { it.name.contains("decoder", ignoreCase = true) && it.name.endsWith(".onnx") }
-            val joi = allFiles.firstOrNull { it.name.contains("joiner", ignoreCase = true) && it.name.endsWith(".onnx") }
-            val tok = allFiles.firstOrNull { it.name.contains("tokens", ignoreCase = true) && it.name.endsWith(".txt") }
-            if (enc != null && dec != null && joi != null && tok != null) {
-                flattenSherpaModelDirectory(modelDir)
-                return hasUsableModelFile(encoder, 1_000_000L) &&
-                        hasUsableModelFile(decoder, 100_000L) &&
-                        hasUsableModelFile(joiner, 10_000L) &&
-                        hasUsableModelFile(tokens, 10L)
-            }
-        }
-
-        return false
-    }
-
-    fun checkSherpaModelStatus() {
-        if (areSherpaFilesPresent()) {
-            _sherpaDownloadState.value = DownloadState.Ready
-        } else if (_sherpaDownloadState.value is DownloadState.Ready) {
-            _sherpaDownloadState.value = DownloadState.Idle
-        }
     }
 
     /**
@@ -543,18 +518,14 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Checks if the currently selected ASR model is installed and ready for inference.
-     * If another installed model is detected on disk, automatically selects it and returns true.
+     * Checks if the currently selected ASR model is installed. Does not change the selection.
      */
-    fun isModelReady(): Boolean {
-        if (isModelReady(_selectedModel.value)) return true
-        val resolved = resolveModelFiles(_selectedModel.value)
-        if (resolved != null) {
-            _selectedModel.value = resolved.model
-            return true
-        }
-        return false
-    }
+    fun isSelectedModelReady(): Boolean = checkModelFilesOnDisk(_selectedModel.value)
+
+    /**
+     * True if any model is installed on disk. Strictly called on Dispatchers.IO.
+     */
+    fun hasAnyModelInstalled(): Boolean = availableModels.any { checkModelFilesOnDisk(it) }
 
     /**
      * Checks disk files for the given model. Strictly called on Dispatchers.IO.
@@ -564,9 +535,14 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Resolves model files for a specific model configuration.
+     * Resolves model files for a specific model from its own folder, models/<model id>/.
      */
     fun resolveFilesForModel(model: AsrModelConfig): ResolvedModelFiles? {
+        migrateLegacyFlatInstall()
+        return resolveFilesInModelDir(model)
+    }
+
+    private fun resolveFilesInModelDir(model: AsrModelConfig): ResolvedModelFiles? {
         val dir = getModelDirectory(model)
         if (dir.exists() && dir.isDirectory) {
             val encoder = findFileInDir(dir, model.encoderFilename) ?: findFileByKeyword(dir, "encoder")
@@ -587,75 +563,10 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Asynchronously and thoroughly searches for any installed ASR model across
-     * model directories, subdirectories, and app internal storage.
+     * Resolves the files of the selected model, and only the selected model.
+     * Returns null when it is not installed, even if other models are.
      */
-    fun resolveModelFiles(preferredModel: AsrModelConfig = _selectedModel.value): ResolvedModelFiles? {
-        // 0. Primary path: check context.filesDir/models/sherpa-onnx
-        val sherpaDir = File(context.filesDir, "models/sherpa-onnx")
-        if (sherpaDir.exists() && sherpaDir.isDirectory) {
-            val enc = File(sherpaDir, "encoder.int8.onnx").let { if (hasUsableModelFile(it, 1_000_000L)) it else findFileByKeyword(sherpaDir, "encoder") }
-            val dec = File(sherpaDir, "decoder.int8.onnx").let { if (hasUsableModelFile(it, 100_000L)) it else findFileByKeyword(sherpaDir, "decoder") }
-            val joi = File(sherpaDir, "joiner.int8.onnx").let { if (hasUsableModelFile(it, 10_000L)) it else findFileByKeyword(sherpaDir, "joiner") }
-            val tok = File(sherpaDir, "tokens.txt").let { if (hasUsableModelFile(it, 10L)) it else findFileByKeyword(sherpaDir, "tokens") }
-
-            if (enc != null && dec != null && joi != null && tok != null &&
-                hasUsableModelFile(enc, 1_000_000L) &&
-                hasUsableModelFile(dec, 100_000L) &&
-                hasUsableModelFile(joi, 10_000L) &&
-                hasUsableModelFile(tok, 10L)
-            ) {
-                return ResolvedModelFiles(preferredModel, enc, dec, joi, tok)
-            }
-        }
-
-        // 1. Check preferred model directory first
-        resolveFilesForModel(preferredModel)?.let { return it }
-
-        // 2. Check all other available models in their respective directories
-        for (model in availableModels) {
-            if (model.id != preferredModel.id) {
-                resolveFilesForModel(model)?.let {
-                    _selectedModel.value = model
-                    return it
-                }
-            }
-        }
-
-        // 3. Scan the general models directory recursively for any valid set of ONNX model files
-        scanDirForAnyValidModel(getModelsDirectory())?.let { return it }
-
-        // 4. Scan internal files directory as fallback
-        scanDirForAnyValidModel(context.filesDir)?.let { return it }
-
-        return null
-    }
-
-    private fun scanDirForAnyValidModel(rootDir: File): ResolvedModelFiles? {
-        if (!rootDir.exists() || !rootDir.isDirectory) return null
-
-        val encoder = findFileByKeyword(rootDir, "encoder")
-        val decoder = findFileByKeyword(rootDir, "decoder")
-        val joiner = findFileByKeyword(rootDir, "joiner")
-        val tokens = findFileByKeyword(rootDir, "tokens")
-
-        if (encoder != null && decoder != null && joiner != null && tokens != null &&
-            hasUsableModelFile(encoder, 1_000_000L) &&
-            hasUsableModelFile(decoder, 100_000L) &&
-            hasUsableModelFile(joiner, 10_000L) &&
-            hasUsableModelFile(tokens, 10L)
-        ) {
-            // Find which model best matches by filename, or fallback to preferred
-            val matchingModel = availableModels.firstOrNull { model ->
-                model.encoderFilename.equals(encoder.name, ignoreCase = true) ||
-                        encoder.name.contains(model.id, ignoreCase = true)
-            } ?: _selectedModel.value
-
-            _selectedModel.value = matchingModel
-            return ResolvedModelFiles(matchingModel, encoder, decoder, joiner, tokens)
-        }
-        return null
-    }
+    fun resolveSelectedModelFiles(): ResolvedModelFiles? = resolveFilesForModel(_selectedModel.value)
 
     fun checkCurrentModelStatus() {
         val current = _selectedModel.value
@@ -669,11 +580,34 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Downloads and sets up the selected ASR model with byte-level progress reporting.
+     * Downloads and installs [model] into its own folder, models/<model id>/, with byte-level
+     * progress reporting. With [reportSetupProgress], progress is also published on
+     * [setupDownloadState] for the first-launch dialog.
      */
-    suspend fun downloadModel(model: AsrModelConfig = _selectedModel.value) = withContext(Dispatchers.IO) {
+    suspend fun downloadModel(
+        model: AsrModelConfig = _selectedModel.value,
+        reportSetupProgress: Boolean = false
+    ) = withContext(Dispatchers.IO) {
         val targetDir = getModelDirectory(model)
         val tempArchiveFile = File(getModelsDirectory(), "${model.id}_temp.archive")
+        var speedBytesPerSec = 0L
+
+        fun report(state: ModelDownloadState) {
+            _downloadState.value = state
+            if (!reportSetupProgress) return
+            _setupDownloadState.value = when (state) {
+                is ModelDownloadState.Downloading -> DownloadState.Downloading(
+                    progress = state.progress,
+                    speedBytesPerSec = speedBytesPerSec,
+                    bytesDownloaded = state.bytesDownloaded,
+                    totalBytes = state.totalBytes
+                )
+                is ModelDownloadState.Extracting -> DownloadState.Extracting
+                is ModelDownloadState.Ready -> DownloadState.Ready
+                is ModelDownloadState.Error -> DownloadState.Error(state.errorMsg)
+                ModelDownloadState.NotDownloaded -> DownloadState.Idle
+            }
+        }
 
         try {
             // Requirement 1: Storage pre-flight check using StatFs (require at least 150MB free)
@@ -681,12 +615,12 @@ class ModelManager(private val context: Context) {
             val minRequiredMb = 150L
             if (availableMb < minRequiredMb) {
                 val error = "Insufficient storage space: At least 150MB of free space is required for offline models (Available: ${availableMb}MB)."
-                _downloadState.value = ModelDownloadState.Error(error)
+                report(ModelDownloadState.Error(error))
                 NotificationHelper.showErrorNotification(context, "Storage Check Failed", error)
                 return@withContext
             }
 
-            _downloadState.value = ModelDownloadState.Downloading(0, model.totalSizeBytes, 0f)
+            report(ModelDownloadState.Downloading(0, model.totalSizeBytes, 0f))
 
             val request = Request.Builder()
                 .url(model.downloadUrl)
@@ -696,7 +630,7 @@ class ModelManager(private val context: Context) {
                 if (!response.isSuccessful) {
                     val error = "Download failed with HTTP ${response.code}: ${response.message}"
                     cleanupPartialFiles(tempArchiveFile, targetDir, model)
-                    _downloadState.value = ModelDownloadState.Error(error)
+                    report(ModelDownloadState.Error(error))
                     NotificationHelper.showErrorNotification(context, "Model Download Failed", error)
                     return@withContext
                 }
@@ -716,12 +650,20 @@ class ModelManager(private val context: Context) {
                         val buffer = ByteArray(32 * 1024)
                         var bytesRead: Int
                         var totalRead = 0L
+                        var lastSpeedTime = System.currentTimeMillis()
+                        var lastSpeedBytes = 0L
 
                         while (input.read(buffer).also { bytesRead = it } != -1) {
                             output.write(buffer, 0, bytesRead)
                             totalRead += bytesRead
+                            val now = System.currentTimeMillis()
+                            if (now - lastSpeedTime >= 350) {
+                                speedBytesPerSec = ((totalRead - lastSpeedBytes) * 1000L) / (now - lastSpeedTime)
+                                lastSpeedTime = now
+                                lastSpeedBytes = totalRead
+                            }
                             val progress = if (contentLength > 0) (totalRead.toFloat() / contentLength.toFloat()).coerceIn(0f, 1f) else 0f
-                            _downloadState.value = ModelDownloadState.Downloading(totalRead, contentLength, progress)
+                            report(ModelDownloadState.Downloading(totalRead, contentLength, progress))
                         }
                         output.flush()
                     }
@@ -729,14 +671,14 @@ class ModelManager(private val context: Context) {
             }
 
             // Extract the downloaded model
-            _downloadState.value = ModelDownloadState.Extracting("Preparing model directory...", 0.05f)
+            report(ModelDownloadState.Extracting("Preparing model directory...", 0.05f))
             if (targetDir.exists()) {
                 targetDir.deleteRecursively()
             }
             targetDir.mkdirs()
 
             val progressCallback: (String, Float) -> Unit = { entryName, prog ->
-                _downloadState.value = ModelDownloadState.Extracting(entryName, prog)
+                report(ModelDownloadState.Extracting(entryName, prog))
             }
 
             // Try unpacking based on archive format (tar.bz2, zip, or direct file)
@@ -756,7 +698,7 @@ class ModelManager(private val context: Context) {
 
             // Verify installation
             if (checkModelFilesOnDisk(model)) {
-                _downloadState.value = ModelDownloadState.Ready(targetDir)
+                report(ModelDownloadState.Ready(targetDir))
                 refreshReadyModels()
                 refreshAvailableStorage()
             } else {
@@ -767,20 +709,20 @@ class ModelManager(private val context: Context) {
                 Log.e(TAG, "Model extraction succeeded but required files are missing. Cleaning up.")
                 cleanupPartialFiles(null, targetDir, model)
                 val error = "Model archive did not contain expected ONNX files. Please retry the download."
-                _downloadState.value = ModelDownloadState.Error(error)
+                report(ModelDownloadState.Error(error))
                 NotificationHelper.showErrorNotification(context, "Model Extraction Failed", error)
             }
 
         } catch (e: CancellationException) {
             // Requirement 2: Clean up partial corrupted files on cancellation
             cleanupPartialFiles(tempArchiveFile, targetDir, model)
-            _downloadState.value = ModelDownloadState.NotDownloaded
+            report(ModelDownloadState.NotDownloaded)
             throw e
         } catch (e: Exception) {
             // Requirement 2: Clean up partial corrupted files on failure
             cleanupPartialFiles(tempArchiveFile, targetDir, model)
             val error = e.localizedMessage ?: "Unknown model download error"
-            _downloadState.value = ModelDownloadState.Error(error)
+            report(ModelDownloadState.Error(error))
             NotificationHelper.showErrorNotification(context, "ASR Model Download Error", error)
         } finally {
             if (tempArchiveFile.exists()) {
@@ -790,149 +732,18 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Downloads and sets up the offline Sherpa-ONNX streaming model for the First-Launch flow.
-     * Extracts files into context.filesDir/models/sherpa-onnx/ using streaming decompression.
-     */
-    suspend fun downloadSherpaModel(
-        remoteUrl: String = DEFAULT_SHERPA_DOWNLOAD_URL
-    ) = withContext(Dispatchers.IO) {
-        if (areSherpaFilesPresent()) {
-            _sherpaDownloadState.value = DownloadState.Ready
-            return@withContext
-        }
-
-        val targetDir = getSherpaModelDirectory()
-        val tempArchiveFile = File(getModelsDirectory(), "sherpa_onnx_download_temp.archive")
-
-        try {
-            val availableMb = refreshAvailableStorage()
-            if (availableMb < 100L) {
-                val error = "Insufficient storage: At least 100MB of free space is required (Available: ${availableMb}MB)."
-                _sherpaDownloadState.value = DownloadState.Error(error)
-                return@withContext
-            }
-
-            _sherpaDownloadState.value = DownloadState.Downloading(
-                progress = 0f,
-                speedBytesPerSec = 0L,
-                bytesDownloaded = 0L,
-                totalBytes = 44_200_000L
-            )
-
-            val request = Request.Builder()
-                .url(remoteUrl)
-                .build()
-
-            httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    val error = "Download failed with HTTP ${response.code}: ${response.message}"
-                    if (tempArchiveFile.exists()) tempArchiveFile.delete()
-                    _sherpaDownloadState.value = DownloadState.Error(error)
-                    return@withContext
-                }
-
-                val body = response.body ?: throw IOException("Empty response body")
-                val contentLength = if (body.contentLength() > 0) body.contentLength() else 44_200_000L
-
-                body.byteStream().use { input ->
-                    FileOutputStream(tempArchiveFile).use { output ->
-                        val buffer = ByteArray(32 * 1024)
-                        var bytesRead: Int
-                        var totalRead = 0L
-                        var lastSpeedTime = System.currentTimeMillis()
-                        var lastSpeedBytes = 0L
-                        var currentSpeed = 0L
-
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
-                            output.write(buffer, 0, bytesRead)
-                            totalRead += bytesRead
-
-                            val now = System.currentTimeMillis()
-                            val timeDelta = now - lastSpeedTime
-                            if (timeDelta >= 350) {
-                                val bytesDelta = totalRead - lastSpeedBytes
-                                currentSpeed = (bytesDelta * 1000L) / timeDelta
-                                lastSpeedTime = now
-                                lastSpeedBytes = totalRead
-                            }
-
-                            val progress = if (contentLength > 0) (totalRead.toFloat() / contentLength.toFloat()).coerceIn(0f, 1f) else 0f
-                            _sherpaDownloadState.value = DownloadState.Downloading(
-                                progress = progress,
-                                speedBytesPerSec = currentSpeed,
-                                bytesDownloaded = totalRead,
-                                totalBytes = contentLength
-                            )
-                        }
-                        output.flush()
-                    }
-                }
-            }
-
-            _sherpaDownloadState.value = DownloadState.Extracting
-            if (targetDir.exists()) {
-                targetDir.deleteRecursively()
-            }
-            targetDir.mkdirs()
-
-            val isZip = isZipFile(tempArchiveFile)
-            val isBz2 = isBzip2File(tempArchiveFile) || remoteUrl.endsWith(".tar.bz2") || remoteUrl.endsWith(".bz2")
-            if (isZip) {
-                unzip(tempArchiveFile, targetDir)
-            } else if (isBz2) {
-                extractTarBz2(tempArchiveFile, targetDir)
-            } else {
-                tempArchiveFile.copyTo(File(targetDir, "encoder.int8.onnx"), overwrite = true)
-            }
-
-            if (tempArchiveFile.exists()) {
-                tempArchiveFile.delete()
-            }
-
-            // Recursive file discovery & directory flattening:
-            // Traverses all subdirectories under targetDir, finds encoder/decoder/joiner/tokens,
-            // moves them directly into root targetDir with normalized names:
-            // encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt,
-            // and deletes leftover empty nested subfolders.
-            flattenSherpaModelDirectory(targetDir)
-
-            if (areSherpaFilesPresent()) {
-                _sherpaDownloadState.value = DownloadState.Ready
-                refreshReadyModels()
-                refreshAvailableStorage()
-                checkCurrentModelStatus()
-                Log.i(TAG, "Sherpa-ONNX model downloaded, flattened, and verified successfully in ${targetDir.absolutePath}")
-            } else {
-                val error = "Model archive extracted, but required files (encoder/decoder/joiner/tokens) were not found."
-                Log.e(TAG, error)
-                _sherpaDownloadState.value = DownloadState.Error(error)
-            }
-
-        } catch (e: CancellationException) {
-            if (tempArchiveFile.exists()) tempArchiveFile.delete()
-            if (targetDir.exists() && !areSherpaFilesPresent()) targetDir.deleteRecursively()
-            _sherpaDownloadState.value = DownloadState.Idle
-            throw e
-        } catch (e: Exception) {
-            if (tempArchiveFile.exists()) tempArchiveFile.delete()
-            if (targetDir.exists() && !areSherpaFilesPresent()) targetDir.deleteRecursively()
-            val error = e.localizedMessage ?: "Failed to download model"
-            Log.e(TAG, "Failed downloading Sherpa model: $error", e)
-            _sherpaDownloadState.value = DownloadState.Error(error)
-        } finally {
-            if (tempArchiveFile.exists()) {
-                tempArchiveFile.delete()
-            }
-        }
-    }
-
-    /**
-     * Deletes the downloaded model files to reclaim storage.
+     * Deletes the model's folder to reclaim storage. This is the only place a model's files live,
+     * so a deleted model can no longer be loaded. If the selected model is deleted and another
+     * model is installed, that one becomes the selection.
      */
     suspend fun deleteModel(model: AsrModelConfig = _selectedModel.value): Boolean = withContext(Dispatchers.IO) {
+        migrateLegacyFlatInstall()
         val dir = getModelDirectory(model)
         val success = if (dir.exists()) dir.deleteRecursively() else true
-        refreshReadyModels()
+        val ready = refreshReadyModels()
+        if (_selectedModel.value.id == model.id) {
+            availableModels.firstOrNull { it.id in ready }?.let { selectModel(it) }
+        }
         refreshAvailableStorage()
         checkCurrentModelStatus()
         success
