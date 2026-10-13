@@ -29,6 +29,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.example.asr.SpeechValidator
 import com.example.data.SettingsRepository
 import com.example.service.AudioCaptureService
+import com.example.translate.SubtitleOrderGate
 import com.example.ui.components.DraggableSubtitleBox
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -83,6 +84,10 @@ class FloatingSubtitleService : Service() {
     // BUG 13 FIX: Track the settings observer job so it can be cancelled before re-launching,
     // preventing multiple settings collectors from accumulating on each showOverlay() call.
     private var settingsCollectJob: Job? = null
+
+    // Only results for the same or a newer utterance are shown, and a partial never
+    // replaces the final of the same utterance (late partial translations are ignored).
+    private val subtitleOrderGate = SubtitleOrderGate()
 
     // State flows actively collected by Compose view for instant recomposition
     private val _floatingOriginalText = MutableStateFlow("Waiting for live speech...")
@@ -364,7 +369,7 @@ class FloatingSubtitleService : Service() {
         }
 
         // Immediately hydrate initial values from translator engine if available
-        translator.latestTranslation.value?.let { initial ->
+        translator.latestTranslation.value?.takeIf { subtitleOrderGate.accept(it) }?.let { initial ->
             if (SpeechValidator.isGenuineSpeech(initial.originalText) && speech.isConfirmedAsrEvent(initial.originalText)) {
                 _floatingOriginalText.value = initial.originalText
             }
@@ -381,7 +386,8 @@ class FloatingSubtitleService : Service() {
             translator.translationFlow.collect { result ->
                 if (!_currentSettings.value.isPaused &&
                     SpeechValidator.isGenuineSpeech(result.originalText) &&
-                    SpeechValidator.isGenuineSpeech(result.translatedText)
+                    SpeechValidator.isGenuineSpeech(result.translatedText) &&
+                    subtitleOrderGate.accept(result)
                 ) {
                     _floatingOriginalText.value = result.originalText
                     _floatingTranslatedText.value = result.translatedText

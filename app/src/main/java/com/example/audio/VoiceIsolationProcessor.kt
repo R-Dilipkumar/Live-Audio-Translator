@@ -3,13 +3,9 @@ package com.example.audio
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.math.sqrt
 
 /**
- * Direct Form I / Transposed Direct Form II IIR Biquad Filter.
- * Used for audio voice isolation:
- * - High-pass 150 Hz cutoff (cleans out rumble, mechanical hum, and heavy bass BGM)
- * - Low-pass 3500 Hz cutoff (strips high-frequency sound effects, sizzle, and cymbal noise)
+ * Direct Form I IIR Biquad Filter (2nd-order Butterworth high-pass / low-pass).
  */
 class BiquadFilter(
     private val b0: Float,
@@ -83,27 +79,44 @@ class BiquadFilter(
 }
 
 /**
- * Bandpass voice isolation processor cascading High-pass (150 Hz) and Low-pass (3500 Hz) filters
- * followed by an RMS Energy Noise Gate.
+ * Light clean-up before speech recognition.
+ *
+ * - Quiet-voice boost (optional): slow automatic gain that lifts soft, breathy or husky speech
+ *   towards a normal speaking level (up to [maxBoost]). It only ever raises the level, never
+ *   lowers it, and does not raise near-silence, so background hiss is not pumped up.
+ * - Filter (optional): a gentle 80 Hz high-pass that removes rumble and hum. It keeps the full
+ *   speech band up to 8 kHz; the models are trained on it and need the high frequencies for
+ *   consonants (an older 3.5 kHz low-pass removed them).
+ * - Noise gate (optional, off when the threshold is 0): silences background sound between
+ *   sentences. Once speech opens the gate it stays open for [gateHoldMs], so quiet word endings,
+ *   short pauses and a softer second speaker are not cut. Below the threshold the audio is
+ *   attenuated rather than zeroed, so the start of a word is still heard.
  */
 class VoiceIsolationProcessor(
-    sampleRate: Float = 16000f,
-    hpCutoff: Float = 150f,
-    lpCutoff: Float = 3500f
+    private val sampleRate: Float = 16000f,
+    hpCutoff: Float = 80f,
+    private val gateHoldMs: Int = 700,
+    private val closedGateGain: Float = 0.1f,
+    private val targetRms: Float = 0.1f,   // about -20 dBFS, a normal speaking level
+    private val maxBoost: Float = 8f,      // at most +18 dB
+    private val silenceRms: Float = 0.002f // below this (about -54 dBFS) the gain is not raised
 ) {
     private val highPass = BiquadFilter.createHighPass(sampleRate, hpCutoff)
-    private val lowPass = BiquadFilter.createLowPass(sampleRate, lpCutoff)
+    private var gateOpenSamplesLeft = 0
+    private var speechLevel = 0f
+    private var boostGain = 1f
 
     /**
-     * Filters the input samples and applies a noise gate.
+     * Filters the input samples and applies the noise gate.
      * @param input 16kHz normalized float PCM samples
-     * @param noiseGateThreshold RMS threshold (typically 0.005f to 0.05f). If RMS is below threshold, samples are zeroed.
-     * @param isFilterEnabled whether DSP bandpass filter is active
+     * @param noiseGateThreshold RMS threshold; 0 turns the gate off.
+     * @param isFilterEnabled whether the high-pass filter is active
      */
     fun process(
         input: FloatArray,
-        noiseGateThreshold: Float = 0.015f,
-        isFilterEnabled: Boolean = true
+        noiseGateThreshold: Float = 0f,
+        isFilterEnabled: Boolean = true,
+        boostQuietVoices: Boolean = false
     ): FloatArray {
         if (input.isEmpty()) return FloatArray(0)
 
@@ -111,27 +124,52 @@ class VoiceIsolationProcessor(
 
         var sumSquare = 0.0
         for (i in input.indices) {
-            val filtered = if (isFilterEnabled) {
-                lowPass.process(highPass.process(input[i]))
-            } else {
-                input[i]
-            }
+            val filtered = if (isFilterEnabled) highPass.process(input[i]) else input[i]
             output[i] = filtered
             sumSquare += (filtered * filtered).toDouble()
         }
 
-        val rms = sqrt(sumSquare / input.size).toFloat()
-
-        // Noise gate: if chunk energy is below threshold, return silence to prevent BGM false triggers
-        if (noiseGateThreshold > 0f && rms < noiseGateThreshold) {
-            output.fill(0f)
+        if (boostQuietVoices) {
+            val chunkRms = kotlin.math.sqrt(sumSquare / input.size).toFloat()
+            if (chunkRms >= silenceRms) {
+                // Follow speech quickly when it gets louder, slowly when it gets softer
+                val rate = if (chunkRms > speechLevel) 0.3f else 0.03f
+                speechLevel += (chunkRms - speechLevel) * rate
+                val wanted = (targetRms / speechLevel.coerceAtLeast(silenceRms)).coerceIn(1f, maxBoost)
+                boostGain += (wanted - boostGain) * 0.2f
+            }
+            if (boostGain > 1.001f) {
+                sumSquare = 0.0
+                for (i in output.indices) {
+                    val v = (output[i] * boostGain).coerceIn(-0.99f, 0.99f)
+                    output[i] = v
+                    sumSquare += (v * v).toDouble()
+                }
+            }
         }
 
+        if (noiseGateThreshold <= 0f) {
+            gateOpenSamplesLeft = 0
+            return output
+        }
+
+        val rms = kotlin.math.sqrt(sumSquare / input.size).toFloat()
+        if (rms >= noiseGateThreshold) {
+            gateOpenSamplesLeft = (sampleRate * gateHoldMs / 1000f).toInt()
+        } else {
+            gateOpenSamplesLeft -= input.size
+        }
+        if (gateOpenSamplesLeft <= 0) {
+            gateOpenSamplesLeft = 0
+            for (i in output.indices) output[i] *= closedGateGain
+        }
         return output
     }
 
     fun reset() {
         highPass.reset()
-        lowPass.reset()
+        gateOpenSamplesLeft = 0
+        speechLevel = 0f
+        boostGain = 1f
     }
 }

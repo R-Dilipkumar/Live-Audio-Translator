@@ -19,6 +19,7 @@ import com.example.audio.AudioUtils
 import com.example.asr.ModelManager
 import com.example.asr.SpeechRecognizerEngine
 import com.example.asr.SpeechValidator
+import com.example.audio.StreamingResampler
 import com.example.audio.VoiceIsolationProcessor
 import com.example.data.AppDatabase
 import com.example.data.SettingsRepository
@@ -29,6 +30,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -51,7 +53,9 @@ class AudioCaptureService : Service() {
     // Audio Pre-processing: Voice isolation (IIR Biquad 150Hz - 3500Hz) & Noise Gate
     private val voiceIsolationProcessor = VoiceIsolationProcessor()
     @Volatile private var isVoiceIsolationActive = true
-    @Volatile private var noiseGateLevel = 0.015f
+    @Volatile private var noiseGateLevel = 0f
+    @Volatile private var isQuietVoiceBoostActive = true
+    @Volatile private var isDebugRecordingActive = false
     private var settingsObserverJob: Job? = null
 
     companion object {
@@ -62,6 +66,11 @@ class AudioCaptureService : Service() {
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
         const val EXTRA_MEDIA_PROJECTION_DATA = "extra_media_projection_data"
+
+        // Audio chunks waiting for the recognizer. One chunk is up to 4096 shorts read from
+        // AudioRecord (~43 ms at 48 kHz stereo, ~256 ms at 16 kHz mono), so this holds
+        // roughly 11-60 s of audio. When full, the oldest chunk is dropped to keep recent audio.
+        const val AUDIO_BUFFER_CAPACITY = 256
 
         // Global state for UI to observe
         private val _isServiceRunning = MutableStateFlow(false)
@@ -129,12 +138,18 @@ class AudioCaptureService : Service() {
 
         settingsObserverJob?.cancel()
         settingsObserverJob = serviceScope.launch {
+            settingsRepo.applyTunedDefaultsOnce()
             settingsRepo.settingsFlow.collect { settings ->
                 isVoiceIsolationActive = settings.isVoiceIsolationEnabled
+                isQuietVoiceBoostActive = settings.isQuietVoiceBoostEnabled
+                isDebugRecordingActive = settings.isDebugAudioRecordingEnabled
                 noiseGateLevel = settings.noiseGateThreshold
 
                 speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
                 speechEngine.maxUtteranceWindow = settings.maxUtteranceWindow
+                speechEngine.noSpeechRestartDelay = settings.noSpeechRestartDelay
+                speechEngine.minSentenceLength = settings.minSentenceLength
+                speechEngine.singleCharacterMode = settings.singleCharacterMode
                 speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
 
                 translatorEngine.confidenceThreshold = settings.languageIdConfidence
@@ -482,16 +497,39 @@ class AudioCaptureService : Service() {
         val speechEngine = getSpeechEngine(this)
         val translatorEngine = getTranslatorEngine(this)
         val transcriptDao = AppDatabase.getInstance(this).transcriptDao()
+        val settingsRepo = SettingsRepository(this)
 
         isCapturing = true
         captureJob?.cancel()
 
         captureJob = serviceScope.launch(Dispatchers.Default) {
-            // Await speechEngine.initEngine() completion before calling record.startRecording()
+            // Apply the saved endpoint settings before the recognizer is built; the settings
+            // observer in onCreate() may not have delivered its first value yet.
+            try {
+                settingsRepo.applyTunedDefaultsOnce()
+                val settings = settingsRepo.settingsFlow.first()
+                isVoiceIsolationActive = settings.isVoiceIsolationEnabled
+                isQuietVoiceBoostActive = settings.isQuietVoiceBoostEnabled
+                isDebugRecordingActive = settings.isDebugAudioRecordingEnabled
+                noiseGateLevel = settings.noiseGateThreshold
+                speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
+                speechEngine.maxUtteranceWindow = settings.maxUtteranceWindow
+                speechEngine.noSpeechRestartDelay = settings.noSpeechRestartDelay
+                speechEngine.minSentenceLength = settings.minSentenceLength
+                speechEngine.singleCharacterMode = settings.singleCharacterMode
+                speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
+                translatorEngine.confidenceThreshold = settings.languageIdConfidence
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not read settings before engine start: ${e.message}")
+            }
+
+            // Await speechEngine.initEngine() completion before calling record.startRecording().
+            // initEngine() is single-flight and returns at once if the selected model is already loaded.
             Log.i(TAG, "Initializing Sherpa-ONNX speech engine on background dispatcher before audio capture...")
             val isEngineReady = speechEngine.initEngine()
             if (!isEngineReady) {
-                val errorMsg = "ASR Model not initialized. Please install model in Manage Models."
+                val errorMsg = (speechEngine.engineState.value as? com.example.asr.RecognizerState.Error)?.message
+                    ?: "ASR Model not initialized. Please install model in Manage Models."
                 Log.e(TAG, errorMsg)
                 _serviceErrorMessage.value = errorMsg
                 NotificationHelper.showErrorNotification(
@@ -512,7 +550,9 @@ class AudioCaptureService : Service() {
             _serviceErrorMessage.value = null
 
             // Continuous background bridge: forward recognized speech to local translator
-            // Debounces Partial ASR draft emissions (~480ms) and immediately dispatches Final commits
+            // Throttles Partial ASR draft emissions (~480ms) and immediately dispatches Final commits.
+            // The translator queue keeps only the newest partial, so a slow translation never
+            // builds a backlog of stale drafts.
             recognitionForwardJob?.cancel()
             recognitionForwardJob = serviceScope.launch(Dispatchers.Default) {
                 var lastPartialDispatchTime = 0L
@@ -547,6 +587,7 @@ class AudioCaptureService : Service() {
             translationPersistJob = serviceScope.launch(Dispatchers.IO) {
                 translatorEngine.translationFlow.collect { result ->
                     if (result.isFinal &&
+                        result.status.isTranslation &&
                         SpeechValidator.isGenuineSpeech(result.originalText) &&
                         SpeechValidator.isGenuineSpeech(result.translatedText) &&
                         speechEngine.isConfirmedAsrEvent(result.originalText)
@@ -572,10 +613,15 @@ class AudioCaptureService : Service() {
             }
 
             // Dedicated High-Priority Audio Buffer:
-            // Push raw PCM chunks immediately into a buffered Kotlin Channel<FloatArray>(capacity = 64).
+            // Push raw PCM chunks immediately into a buffered Kotlin Channel<FloatArray>(capacity = AUDIO_BUFFER_CAPACITY).
             // The audio read loop runs on a dedicated high-priority thread (THREAD_PRIORITY_URGENT_AUDIO)
             // and never waits on decoding, translation, or locks.
-            val audioBufferChannel = kotlinx.coroutines.channels.Channel<FloatArray>(capacity = 64)
+            val audioBufferChannel = kotlinx.coroutines.channels.Channel<FloatArray>(capacity = AUDIO_BUFFER_CAPACITY)
+            var droppedAudioChunks = 0L
+
+            // From here on audio is fed to the recognizer; it must not be rebuilt or released
+            // until this capture ends (see SpeechRecognizerEngine.initEngine).
+            speechEngine.beginCapture()
 
             // Consumer coroutine: pulls audio buffers and feeds to SpeechRecognizerEngine
             val decodingConsumerJob = serviceScope.launch(Dispatchers.Default) {
@@ -597,6 +643,27 @@ class AudioCaptureService : Service() {
                 }
 
                 val shortBuffer = ShortArray(4096)
+                // One resampler per capture: it carries filter state across buffers
+                val resampler = StreamingResampler(inRate = sampleRate, outRate = 16000)
+                voiceIsolationProcessor.reset()
+                // Developer option: save what the speech engine receives (files/debug/asr_input.wav)
+                val debugRecorder = if (isDebugRecordingActive) {
+                    try {
+                        val dir = java.io.File(filesDir, "debug").apply { mkdirs() }
+                        com.example.audio.WavRecorder(java.io.File(dir, "asr_input.wav")).also {
+                            Log.i(TAG, "Recording recognizer input to ${dir.absolutePath}/asr_input.wav")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not start debug recording: ${e.message}")
+                        null
+                    }
+                } else null
+                // Input level statistics, logged every 5 seconds
+                var statSamples = 0
+                var statRawSq = 0.0
+                var statSentSq = 0.0
+                var statPeak = 0f
+                var statClipped = 0
                 try {
                     record.startRecording()
                     Log.i(TAG, "Audio capture loop started successfully on dedicated thread with initialized ASR engine")
@@ -604,24 +671,52 @@ class AudioCaptureService : Service() {
                     while (isCapturing && isActive) {
                         val readShorts = record.read(shortBuffer, 0, shortBuffer.size)
                         if (readShorts > 0) {
-                            // Downmix stereo to mono, resample to 16 kHz, normalize to [-1.0f, 1.0f]
-                            val floatSamples = AudioUtils.processRawAudioTo16kMonoFloats(
-                                stereoPcmBuffer = shortBuffer,
-                                readShorts = readShorts,
-                                sampleRate = sampleRate,
-                                isStereo = isStereo
+                            // Downmix stereo to mono floats, then resample to 16 kHz with anti-aliasing
+                            val floatSamples = resampler.process(
+                                AudioUtils.toMonoFloats(shortBuffer, readShorts, isStereo)
                             )
+                            if (floatSamples.isEmpty()) continue
 
-                            // Voice Isolation DSP Filter (150Hz - 3500Hz bandpass) + Noise Gate (RMS threshold)
+                            // Optional rumble filter and noise gate (see VoiceIsolationProcessor)
                             val processedSamples = voiceIsolationProcessor.process(
                                 input = floatSamples,
                                 noiseGateThreshold = noiseGateLevel,
-                                isFilterEnabled = isVoiceIsolationActive
+                                isFilterEnabled = isVoiceIsolationActive,
+                                boostQuietVoices = isQuietVoiceBoostActive
                             )
 
-                            // Non-blocking push into buffered Kotlin Channel (capacity = 64)
-                            // If channel capacity is momentarily full, trySend drops or oldest rather than blocking audio capture
-                            audioBufferChannel.trySend(processedSamples)
+                            // Non-blocking push. If the recognizer has fallen behind and the buffer is full,
+                            // drop the oldest chunk so the newest audio is kept, and count the drop.
+                            if (!audioBufferChannel.trySend(processedSamples).isSuccess) {
+                                audioBufferChannel.tryReceive()
+                                audioBufferChannel.trySend(processedSamples)
+                                droppedAudioChunks++
+                                if (droppedAudioChunks == 1L || droppedAudioChunks % 50L == 0L) {
+                                    Log.w(TAG, "Audio buffer full: dropped $droppedAudioChunks oldest chunk(s) so far; recognizer is falling behind")
+                                }
+                            }
+
+                            debugRecorder?.write(processedSamples)
+                            for (i in processedSamples.indices) {
+                                val raw = floatSamples[i]
+                                val sent = processedSamples[i]
+                                statRawSq += raw * raw
+                                statSentSq += sent * sent
+                                if (kotlin.math.abs(raw) > statPeak) statPeak = kotlin.math.abs(raw)
+                                if (kotlin.math.abs(sent) >= 0.98f) statClipped++
+                            }
+                            statSamples += processedSamples.size
+                            if (statSamples >= 16000 * 5) {
+                                fun dbfs(sq: Double) = if (sq <= 0.0) -120.0 else 10 * kotlin.math.log10(sq / statSamples)
+                                Log.i(TAG, String.format(java.util.Locale.US,
+                                    "Input level (5 s): captured %.1f dBFS (peak %.1f), sent to recognizer %.1f dBFS, clipped %.2f%%, dropped chunks %d",
+                                    dbfs(statRawSq),
+                                    if (statPeak > 0f) 20 * kotlin.math.log10(statPeak.toDouble()) else -120.0,
+                                    dbfs(statSentSq),
+                                    100.0 * statClipped / statSamples,
+                                    droppedAudioChunks))
+                                statSamples = 0; statRawSq = 0.0; statSentSq = 0.0; statPeak = 0f; statClipped = 0
+                            }
 
                             // Calculate RMS dB for UI visualizer
                             val db = AudioUtils.calculateDbLevel(processedSamples)
@@ -640,6 +735,7 @@ class AudioCaptureService : Service() {
                         record.stop()
                         record.release()
                     } catch (_: Exception) {}
+                    try { debugRecorder?.close() } catch (_: Exception) {}
                     audioBufferChannel.close()
                     speechEngine.flushCurrentSegment()
                     _liveAudioDb.value = 0f
@@ -657,6 +753,10 @@ class AudioCaptureService : Service() {
             } finally {
                 audioCaptureThread.interrupt()
                 decodingConsumerJob.cancel()
+                speechEngine.endCapture()
+                if (droppedAudioChunks > 0) {
+                    Log.w(TAG, "Capture ended with $droppedAudioChunks dropped audio chunk(s)")
+                }
             }
         }
     }

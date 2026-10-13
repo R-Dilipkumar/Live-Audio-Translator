@@ -31,21 +31,31 @@ object SpeechValidator {
         "ready to transcribe & translate audio"
     )
 
+    private val STATUS_PHRASE_SET = STATUS_PHRASES.map { normalize(it) }.toSet()
+
+    // Lowercase, collapse whitespace, and drop trailing ellipsis/punctuation so
+    // "Listening...", "Listening…" and "listening" compare equal.
+    private fun normalize(text: String): String {
+        return text.trim()
+            .lowercase()
+            .replace(Regex("\\s+"), " ")
+            .trimEnd('.', '…', '!', '?', ' ')
+    }
+
     /**
      * Checks if the given text is a genuine spoken utterance.
-     * Returns false if the text is null, blank, matches a known system status phrase,
-     * or contains bracketed status annotations.
+     * Returns false if the text is null, blank, is exactly a known system status phrase
+     * (ignoring case and trailing punctuation), or is a bracketed status annotation.
+     * Only whole phrases are matched, so real speech that merely starts with a status word
+     * ("Listening to music is fun") is kept.
      */
     fun isGenuineSpeech(text: String?): Boolean {
         if (text.isNullOrBlank()) return false
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return false
 
-        val lower = trimmed.lowercase()
-        for (phrase in STATUS_PHRASES) {
-            if (lower == phrase || lower.startsWith(phrase)) {
-                return false
-            }
+        if (normalize(trimmed) in STATUS_PHRASE_SET) {
+            return false
         }
 
         // Diagnostic brackets such as [Translation Paused], [Status], etc.
