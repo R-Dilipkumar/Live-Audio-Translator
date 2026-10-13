@@ -111,7 +111,7 @@ fun MainScreen(
     val isOverlayActive by viewModel.isFloatingOverlayActive.collectAsStateWithLifecycle()
     val overlaySettings by viewModel.floatingSettings.collectAsStateWithLifecycle()
     val isDrmSilenceDetected by viewModel.isDrmSilenceDetected.collectAsStateWithLifecycle()
-    val sherpaDownloadState by viewModel.sherpaDownloadState.collectAsStateWithLifecycle()
+    val setupDownloadState by viewModel.setupDownloadState.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedTab by remember { mutableIntStateOf(0) } // 0: Translate, 1: Manage Models
@@ -121,21 +121,11 @@ fun MainScreen(
     var showHistorySheet by remember { mutableStateOf(false) }
 
     // Guarded First-Launch Model Setup Flow:
-    // On cold launch, check if model files are ready. If missing, trigger download and show onboarding dialog.
-    // Do NOT call viewModel.initializeSpeechRecognizer() here on cold launch.
+    // On cold launch, load the selected model if installed; if no model is installed at all,
+    // download the selected one (into its own folder) and show the onboarding dialog.
+    // The ViewModel loads the recognizer once the download finishes.
     LaunchedEffect(Unit) {
-        if (!viewModel.isSherpaModelReady()) {
-            viewModel.downloadSherpaModel()
-        } else {
-            viewModel.initializeSpeechRecognizer()
-        }
-    }
-
-    // Only initialize recognizer when ModelManager.downloadSherpaModel() completes with DownloadState.Ready
-    LaunchedEffect(sherpaDownloadState) {
-        if (sherpaDownloadState is DownloadState.Ready && viewModel.isSherpaModelReady()) {
-            viewModel.initializeSpeechRecognizer()
-        }
+        viewModel.prepareAsrOnLaunch()
     }
 
     LaunchedEffect(errorMessage) {
@@ -799,8 +789,11 @@ fun MainScreen(
     }
 
     // First-Launch Onboarding Modal: Non-dismissible Material 3 Dialog
-    val isSherpaReady = viewModel.isSherpaModelReady() || sherpaDownloadState is DownloadState.Ready
-    if (!isSherpaReady) {
+    // Shown only while the first-launch download is running or has failed.
+    val isSetupInProgress = setupDownloadState is DownloadState.Downloading ||
+        setupDownloadState is DownloadState.Extracting ||
+        setupDownloadState is DownloadState.Error
+    if (isSetupInProgress) {
         Dialog(
             onDismissRequest = { /* Non-dismissible: required for offline transcription */ },
             properties = DialogProperties(
@@ -861,7 +854,7 @@ fun MainScreen(
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    when (val state = sherpaDownloadState) {
+                    when (val state = setupDownloadState) {
                         is DownloadState.Downloading -> {
                             val animatedProgress by animateFloatAsState(
                                 targetValue = state.progress,
@@ -955,7 +948,7 @@ fun MainScreen(
                             Spacer(modifier = Modifier.height(16.dp))
 
                             Button(
-                                onClick = { viewModel.downloadSherpaModel() },
+                                onClick = { viewModel.downloadInitialAsrModel() },
                                 modifier = Modifier.testTag("retry_model_download_button")
                             ) {
                                 Text("Retry Download")
