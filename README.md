@@ -1,4 +1,4 @@
-# LiveSub — Live Audio Translator
+# LiveSub — Offline Translator
 
 **Private, offline live subtitles and translation for any app on Android.**
 
@@ -6,9 +6,9 @@ Live subtitles for anything playing on your Android phone. LiveSub listens to a 
 
 Speech recognition and translation run on the phone. Audio and text are not sent to a server.
 
-[![Download APK](https://img.shields.io/github/v/release/R-Dilipkumar/Live-Audio-Translator?label=Download%20APK&color=success)](https://github.com/R-Dilipkumar/Live-Audio-Translator/releases/latest)
+[![Download APK](https://img.shields.io/github/v/release/R-Dilipkumar/LiveSub-Offline-Translator?label=Download%20APK&color=success)](https://github.com/R-Dilipkumar/LiveSub-Offline-Translator/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/R-Dilipkumar/Live-Audio-Translator?style=social)](https://github.com/R-Dilipkumar/Live-Audio-Translator/stargazers)
+[![Stars](https://img.shields.io/github/stars/R-Dilipkumar/LiveSub-Offline-Translator?style=social)](https://github.com/R-Dilipkumar/LiveSub-Offline-Translator/stargazers)
 [![Android 10+](https://img.shields.io/badge/Android-10%2B-brightgreen.svg)](https://developer.android.com)
 [![Speech: Sherpa-ONNX](https://img.shields.io/badge/Speech-Sherpa--ONNX-orange.svg)](https://github.com/k2-fsa/sherpa-onnx)
 [![Translation: ML Kit](https://img.shields.io/badge/Translation-Google%20ML%20Kit-blue.svg)](https://developers.google.com/ml-kit/language/translation)
@@ -30,7 +30,7 @@ If LiveSub is useful to you, please give it a ⭐ — it helps others find it.
 
 ## Download
 
-Get the latest APK from [Releases](https://github.com/R-Dilipkumar/Live-Audio-Translator/releases). Open it on your phone and allow installing from that source.
+Get the latest APK from [Releases](https://github.com/R-Dilipkumar/LiveSub-Offline-Translator/releases). Open it on your phone and allow installing from that source.
 
 Test builds are signed with a debug key, so Android may warn that the developer is unknown.
 
@@ -96,8 +96,8 @@ flowchart LR
 Requirements: JDK 17+, Android SDK (platform 36.1, build-tools 36.1.0) and the NDK. Android Studio is optional.
 
 ```bash
-git clone https://github.com/R-Dilipkumar/Live-Audio-Translator.git
-cd Live-Audio-Translator
+git clone https://github.com/R-Dilipkumar/LiveSub-Offline-Translator.git
+cd LiveSub-Offline-Translator
 ```
 
 Create `local.properties` with `sdk.dir=<path to your Android SDK>`. Debug builds are signed with `debug.keystore` in the project root (not in the repository), so create one first, for example with `keytool -genkeypair -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -validity 10000 -dname "CN=Android Debug"`.
