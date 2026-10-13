@@ -9,7 +9,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.util.Log
 import com.example.asr.AsrModelConfig
-import com.example.asr.DownloadState
 import com.example.asr.ModelDownloadState
 import com.example.asr.ModelManager
 import com.example.asr.SpeechRecognizerEngine
@@ -27,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -50,33 +50,18 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
 
     // ASR model state
     val asrDownloadState: StateFlow<ModelDownloadState> = modelManager.downloadState
-    // First-launch download progress (onboarding dialog)
-    val setupDownloadState: StateFlow<DownloadState> = modelManager.setupDownloadState
     val selectedAsrModel: StateFlow<AsrModelConfig> = modelManager.selectedModel
+    val activeAsrDownloadId: StateFlow<String?> = modelManager.activeDownloadId
     val availableAsrModels: List<AsrModelConfig> = modelManager.availableModels
 
-    /**
-     * Cold-launch check: if the selected model is installed, load it. If no model is installed
-     * at all, download the selected one (first launch). If other models are installed but not the
-     * selected one, do nothing; the user picks or downloads one in Manage Models.
-     */
-    fun prepareAsrOnLaunch() {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (modelManager.isSelectedModelReady()) {
-                speechEngine.initEngine()
-            } else if (!modelManager.hasAnyModelInstalled()) {
-                downloadInitialAsrModel()
-            }
-        }
-    }
-
-    /** Downloads the selected model with first-launch progress, then loads it. */
-    fun downloadInitialAsrModel() {
-        viewModelScope.launch {
-            modelManager.downloadModel(modelManager.selectedModel.value, reportSetupProgress = true)
-            initializeSpeechRecognizer()
-        }
-    }
+    // False once the startup scan has run and the selected model is not on disk.
+    // Starts true so the "no model installed" hint does not flash before the scan finishes.
+    val isSelectedAsrModelInstalled: StateFlow<Boolean> = combine(
+        modelManager.hasScannedModels,
+        modelManager.readyModelIds,
+        modelManager.selectedModel
+    ) { scanned, ready, selected -> !scanned || selected.id in ready }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
     fun initializeSpeechRecognizer() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -146,6 +131,10 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     private val _currentTranslatedSpeech = MutableStateFlow("")
     val currentTranslatedSpeech: StateFlow<String> = _currentTranslatedSpeech.asStateFlow()
 
+    // Translation of the sentence still being spoken (empty once that sentence is final)
+    private val _liveDraftTranslation = MutableStateFlow("")
+    val liveDraftTranslation: StateFlow<String> = _liveDraftTranslation.asStateFlow()
+
     val livePartialSpeech: StateFlow<String> = speechEngine.partialTextFlow
 
     // Floating overlay window state
@@ -178,6 +167,8 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
+        viewModelScope.launch { settingsRepository.applyTunedDefaultsOnce() }
+
         // Hydrate latest translation if service has already processed speech before ViewModel creation
         translatorEngine.latestTranslation.value?.takeIf { subtitleOrderGate.accept(it) }?.let { initial ->
             if (SpeechValidator.isGenuineSpeech(initial.originalText) && speechEngine.isConfirmedAsrEvent(initial.originalText)) {
@@ -228,6 +219,7 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
                     if (SpeechValidator.isGenuineSpeech(result.translatedText)) {
                         _currentTranslatedSpeech.value = result.translatedText
                     }
+                    _liveDraftTranslation.value = if (result.isFinal) "" else result.translatedText
                 }
             }
         }
@@ -326,6 +318,8 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         }
         viewModelScope.launch {
             modelManager.downloadModel(model)
+            // Load it now if it is the selected model
+            initializeSpeechRecognizer()
         }
     }
 

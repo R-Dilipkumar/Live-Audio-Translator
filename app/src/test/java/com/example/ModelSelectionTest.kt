@@ -32,7 +32,7 @@ class ModelSelectionTest {
         context.getSharedPreferences("asr_model_prefs", Context.MODE_PRIVATE).edit().clear().commit()
     }
 
-    private fun writeModelFiles(dir: File, encoder: String, decoder: String, joiner: String, tokenLines: Int) {
+    private fun writeModelFiles(dir: File, encoder: String, decoder: String, joiner: String, tokenLines: Int = 500) {
         dir.mkdirs()
         File(dir, encoder).writeBytes(ByteArray(1_100_000))
         File(dir, decoder).writeBytes(ByteArray(150_000))
@@ -40,70 +40,59 @@ class ModelSelectionTest {
         File(dir, "tokens.txt").writeText((0 until tokenLines).joinToString("\n") { "tok$it $it" })
     }
 
-    private fun writeLegacyFlatInstall(tokenLines: Int = 500) {
-        writeModelFiles(
-            File(context.filesDir, ModelManager.LEGACY_FLAT_DIR),
-            "encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", tokenLines
-        )
+    private fun ModelManager.model(id: String) = availableModels.first { it.id == id }
+
+    private fun ModelManager.install(id: String) {
+        val model = model(id)
+        writeModelFiles(getModelDirectory(model), model.encoderFilename, model.decoderFilename, model.joinerFilename)
     }
 
-    private fun ModelManager.model(id: String) = availableModels.first { it.id == id }
+    @Test
+    fun catalogueHasOneModelPerLanguageAndOneMultilingual() {
+        val manager = ModelManager(context)
+        val single = manager.availableModels.filter { !it.isMultilingual }
+        assertEquals(1, manager.availableModels.count { it.isMultilingual })
+        assertEquals(single.size, single.map { it.languageCode }.toSet().size)
+        assertTrue(manager.availableModels.all { it.downloadUrl.startsWith(ModelManager.RELEASE_URL) })
+    }
 
     @Test
     fun selectingModelBLoadsModelBNotTheFlatFolder() {
         // Old layout: a flat install that used to win regardless of selection.
-        writeLegacyFlatInstall()
-        val manager = ModelManager(context)
-        val french = manager.model("zipformer_fr")
         writeModelFiles(
-            manager.getModelDirectory(french),
-            french.encoderFilename, french.decoderFilename, french.joinerFilename, tokenLines = 5000
+            File(context.filesDir, ModelManager.LEGACY_FLAT_DIR),
+            "encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx"
         )
+        val manager = ModelManager(context)
+        manager.install("kroko_fr")
         val engine = SpeechRecognizerEngine(context, manager)
 
-        manager.selectModel(french)
+        manager.selectModel(manager.model("kroko_fr"))
         val loaded = engine.resolveModelForLoad()
 
         assertNotNull(loaded)
-        assertEquals("zipformer_fr", loaded!!.modelId)
-        assertEquals("zipformer", loaded.modelType)
-        assertTrue(loaded.encoderFile.canonicalPath.startsWith(manager.getModelDirectory(french).canonicalPath))
-        assertFalse("Flat folder must be gone after migration", File(context.filesDir, ModelManager.LEGACY_FLAT_DIR).exists())
+        assertEquals("kroko_fr", loaded!!.modelId)
+        assertTrue(loaded.encoderFile.canonicalPath.startsWith(manager.getModelDirectory(manager.model("kroko_fr")).canonicalPath))
+        assertFalse("Flat folder must be removed", File(context.filesDir, ModelManager.LEGACY_FLAT_DIR).exists())
     }
 
     @Test
-    fun flatInstallIsMigratedIntoDefaultModelFolder() {
-        writeLegacyFlatInstall()
+    fun retiredModelFoldersAreRemoved() {
+        File(modelsDir, "zipformer_en_fast").mkdirs()
+        File(modelsDir, "zipformer_en_fast/encoder.onnx").writeBytes(ByteArray(10))
         val manager = ModelManager(context)
-        val englishFast = manager.model(ModelManager.DEFAULT_MODEL_ID)
-
-        val resolved = manager.resolveFilesForModel(englishFast)
-
-        assertNotNull(resolved)
-        assertTrue(resolved!!.encoderFile.canonicalPath.startsWith(manager.getModelDirectory(englishFast).canonicalPath))
-        assertFalse(File(context.filesDir, ModelManager.LEGACY_FLAT_DIR).exists())
-    }
-
-    @Test
-    fun unidentifiableFlatInstallIsDeletedNotMigrated() {
-        // A character-level vocabulary (thousands of tokens) is not the English 20M model.
-        writeLegacyFlatInstall(tokenLines = 6000)
-        val manager = ModelManager(context)
+        manager.install("kroko_en")
 
         manager.migrateLegacyFlatInstall()
 
-        assertFalse(File(context.filesDir, ModelManager.LEGACY_FLAT_DIR).exists())
-        assertNull(manager.resolveFilesForModel(manager.model(ModelManager.DEFAULT_MODEL_ID)))
+        assertFalse(File(modelsDir, "zipformer_en_fast").exists())
+        assertNotNull(manager.resolveFilesForModel(manager.model("kroko_en")))
     }
 
     @Test
     fun selectedModelThatIsNotInstalledDoesNotFallBackToAnotherModel() {
         val manager = ModelManager(context)
-        val englishFast = manager.model(ModelManager.DEFAULT_MODEL_ID)
-        writeModelFiles(
-            manager.getModelDirectory(englishFast),
-            englishFast.encoderFilename, englishFast.decoderFilename, englishFast.joinerFilename, tokenLines = 500
-        )
+        manager.install("kroko_en")
         val engine = SpeechRecognizerEngine(context, manager)
 
         manager.selectModel(manager.model("zipformer_ko"))
@@ -114,26 +103,56 @@ class ModelSelectionTest {
 
     @Test
     fun deletedModelCanNoLongerBeLoaded() = runBlocking {
-        writeLegacyFlatInstall()
         val manager = ModelManager(context)
-        val englishFast = manager.model(ModelManager.DEFAULT_MODEL_ID)
+        manager.install("kroko_en")
+        val englishModel = manager.model("kroko_en")
         val engine = SpeechRecognizerEngine(context, manager)
-        manager.selectModel(englishFast)
+        manager.selectModel(englishModel)
         assertNotNull(engine.resolveModelForLoad())
 
-        assertTrue(manager.deleteModel(englishFast))
+        assertTrue(manager.deleteModel(englishModel))
 
         assertNull(engine.resolveModelForLoad())
-        assertFalse(manager.getModelDirectory(englishFast).exists())
-        assertFalse(File(context.filesDir, ModelManager.LEGACY_FLAT_DIR).exists())
+        assertFalse(manager.getModelDirectory(englishModel).exists())
+    }
+
+    @Test
+    fun unusedArchiveFilesAreDeletedAndConfiguredFilesKept() {
+        val manager = ModelManager(context)
+        val korean = manager.model("zipformer_ko")
+        val dir = File(manager.getModelDirectory(korean), "sherpa-onnx-streaming-zipformer-korean-2024-06-16")
+        writeModelFiles(dir, korean.encoderFilename, korean.decoderFilename, korean.joinerFilename)
+        // Extra files shipped in the archive: the other precision variants and test audio
+        File(dir, "encoder-epoch-99-avg-1.onnx").writeBytes(ByteArray(1_200_000))
+        File(dir, "joiner-epoch-99-avg-1.onnx").writeBytes(ByteArray(20_000))
+        File(dir, "test_wavs").mkdirs()
+        File(dir, "test_wavs/0.wav").writeBytes(ByteArray(1000))
+
+        manager.pruneUnusedFiles(korean)
+
+        val remaining = manager.getModelDirectory(korean).walkTopDown().filter { it.isFile }.map { it.name }.toSet()
+        assertEquals(
+            setOf(korean.encoderFilename, korean.decoderFilename, korean.joinerFilename, "tokens.txt"),
+            remaining
+        )
+        assertNotNull(manager.resolveFilesForModel(korean))
     }
 
     @Test
     fun selectionIsRememberedAcrossInstances() {
         val first = ModelManager(context)
-        first.selectModel(first.model("zipformer_zh_fast"))
+        first.selectModel(first.model("xasr_zh_en"))
 
         val second = ModelManager(context)
-        assertEquals("zipformer_zh_fast", second.selectedModel.value.id)
+        assertEquals("xasr_zh_en", second.selectedModel.value.id)
+    }
+
+    @Test
+    fun retiredSavedSelectionFallsBackToDefault() {
+        context.getSharedPreferences("asr_model_prefs", Context.MODE_PRIVATE)
+            .edit().putString("selected_model_id", "zipformer_en_fast").commit()
+
+        val manager = ModelManager(context)
+        assertEquals(ModelManager.DEFAULT_MODEL_ID, manager.selectedModel.value.id)
     }
 }

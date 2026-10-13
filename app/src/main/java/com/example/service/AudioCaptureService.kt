@@ -19,6 +19,7 @@ import com.example.audio.AudioUtils
 import com.example.asr.ModelManager
 import com.example.asr.SpeechRecognizerEngine
 import com.example.asr.SpeechValidator
+import com.example.audio.StreamingResampler
 import com.example.audio.VoiceIsolationProcessor
 import com.example.data.AppDatabase
 import com.example.data.SettingsRepository
@@ -52,7 +53,8 @@ class AudioCaptureService : Service() {
     // Audio Pre-processing: Voice isolation (IIR Biquad 150Hz - 3500Hz) & Noise Gate
     private val voiceIsolationProcessor = VoiceIsolationProcessor()
     @Volatile private var isVoiceIsolationActive = true
-    @Volatile private var noiseGateLevel = 0.015f
+    @Volatile private var noiseGateLevel = 0f
+    @Volatile private var isQuietVoiceBoostActive = true
     private var settingsObserverJob: Job? = null
 
     companion object {
@@ -135,8 +137,10 @@ class AudioCaptureService : Service() {
 
         settingsObserverJob?.cancel()
         settingsObserverJob = serviceScope.launch {
+            settingsRepo.applyTunedDefaultsOnce()
             settingsRepo.settingsFlow.collect { settings ->
                 isVoiceIsolationActive = settings.isVoiceIsolationEnabled
+                isQuietVoiceBoostActive = settings.isQuietVoiceBoostEnabled
                 noiseGateLevel = settings.noiseGateThreshold
 
                 speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
@@ -497,7 +501,11 @@ class AudioCaptureService : Service() {
             // Apply the saved endpoint settings before the recognizer is built; the settings
             // observer in onCreate() may not have delivered its first value yet.
             try {
+                settingsRepo.applyTunedDefaultsOnce()
                 val settings = settingsRepo.settingsFlow.first()
+                isVoiceIsolationActive = settings.isVoiceIsolationEnabled
+                isQuietVoiceBoostActive = settings.isQuietVoiceBoostEnabled
+                noiseGateLevel = settings.noiseGateThreshold
                 speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
                 speechEngine.maxUtteranceWindow = settings.maxUtteranceWindow
                 speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
@@ -626,6 +634,9 @@ class AudioCaptureService : Service() {
                 }
 
                 val shortBuffer = ShortArray(4096)
+                // One resampler per capture: it carries filter state across buffers
+                val resampler = StreamingResampler(inRate = sampleRate, outRate = 16000)
+                voiceIsolationProcessor.reset()
                 try {
                     record.startRecording()
                     Log.i(TAG, "Audio capture loop started successfully on dedicated thread with initialized ASR engine")
@@ -633,19 +644,18 @@ class AudioCaptureService : Service() {
                     while (isCapturing && isActive) {
                         val readShorts = record.read(shortBuffer, 0, shortBuffer.size)
                         if (readShorts > 0) {
-                            // Downmix stereo to mono, resample to 16 kHz, normalize to [-1.0f, 1.0f]
-                            val floatSamples = AudioUtils.processRawAudioTo16kMonoFloats(
-                                stereoPcmBuffer = shortBuffer,
-                                readShorts = readShorts,
-                                sampleRate = sampleRate,
-                                isStereo = isStereo
+                            // Downmix stereo to mono floats, then resample to 16 kHz with anti-aliasing
+                            val floatSamples = resampler.process(
+                                AudioUtils.toMonoFloats(shortBuffer, readShorts, isStereo)
                             )
+                            if (floatSamples.isEmpty()) continue
 
-                            // Voice Isolation DSP Filter (150Hz - 3500Hz bandpass) + Noise Gate (RMS threshold)
+                            // Optional rumble filter and noise gate (see VoiceIsolationProcessor)
                             val processedSamples = voiceIsolationProcessor.process(
                                 input = floatSamples,
                                 noiseGateThreshold = noiseGateLevel,
-                                isFilterEnabled = isVoiceIsolationActive
+                                isFilterEnabled = isVoiceIsolationActive,
+                                boostQuietVoices = isQuietVoiceBoostActive
                             )
 
                             // Non-blocking push. If the recognizer has fallen behind and the buffer is full,
