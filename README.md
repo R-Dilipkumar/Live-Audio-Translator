@@ -1,12 +1,32 @@
 # LiveSub — Live Audio Translator
 
+**Private, offline live subtitles and translation for any app on Android.**
+
 Live subtitles for anything playing on your Android phone. LiveSub listens to a video, stream, game or call, turns the speech into text, translates it, and shows the translation in a floating subtitle box on top of the app you are using.
 
 Speech recognition and translation run on the phone. Audio and text are not sent to a server.
 
+[![Download APK](https://img.shields.io/github/v/release/R-Dilipkumar/Live-Audio-Translator?label=Download%20APK&color=success)](https://github.com/R-Dilipkumar/Live-Audio-Translator/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/R-Dilipkumar/Live-Audio-Translator?style=social)](https://github.com/R-Dilipkumar/Live-Audio-Translator/stargazers)
 [![Android 10+](https://img.shields.io/badge/Android-10%2B-brightgreen.svg)](https://developer.android.com)
 [![Speech: Sherpa-ONNX](https://img.shields.io/badge/Speech-Sherpa--ONNX-orange.svg)](https://github.com/k2-fsa/sherpa-onnx)
 [![Translation: ML Kit](https://img.shields.io/badge/Translation-Google%20ML%20Kit-blue.svg)](https://developers.google.com/ml-kit/language/translation)
+
+<!-- Screenshots: add 2–3 phone screenshots or a short GIF of the overlay here -->
+
+## Why LiveSub
+
+Most live-translation apps send your audio to a cloud service, only listen to the microphone, or show text inside their own app. Google's Live Translate only runs on some phones. LiveSub is different:
+
+- **Subtitles over any app.** A floating box on top of YouTube, games, calls and more.
+- **Hears your phone's own audio**, not just the microphone.
+- **Fully on the phone.** No account, no API key, no audio uploaded.
+- **Live, word by word.** Text appears while people are still speaking.
+- **Works on any Android 10+ phone**, not only Pixels.
+- **Free and open source** under the MIT license.
+
+If LiveSub is useful to you, please give it a ⭐ — it helps others find it.
 
 ## Download
 
@@ -109,3 +129,7 @@ Release builds read `KEYSTORE_PATH`, `STORE_PASSWORD` and `KEY_PASSWORD` from en
 ## Contributing
 
 Bug reports and pull requests are welcome. Please run `./gradlew :app:testDebugUnitTest` before opening a pull request.
+
+## License
+
+LiveSub's code is released under the [MIT License](LICENSE). Speech models and translation packs are downloaded separately and keep their own licenses (see [Speech models](#speech-models)).
