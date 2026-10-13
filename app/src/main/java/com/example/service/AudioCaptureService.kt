@@ -55,6 +55,7 @@ class AudioCaptureService : Service() {
     @Volatile private var isVoiceIsolationActive = true
     @Volatile private var noiseGateLevel = 0f
     @Volatile private var isQuietVoiceBoostActive = true
+    @Volatile private var isDebugRecordingActive = false
     private var settingsObserverJob: Job? = null
 
     companion object {
@@ -141,10 +142,14 @@ class AudioCaptureService : Service() {
             settingsRepo.settingsFlow.collect { settings ->
                 isVoiceIsolationActive = settings.isVoiceIsolationEnabled
                 isQuietVoiceBoostActive = settings.isQuietVoiceBoostEnabled
+                isDebugRecordingActive = settings.isDebugAudioRecordingEnabled
                 noiseGateLevel = settings.noiseGateThreshold
 
                 speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
                 speechEngine.maxUtteranceWindow = settings.maxUtteranceWindow
+                speechEngine.noSpeechRestartDelay = settings.noSpeechRestartDelay
+                speechEngine.minSentenceLength = settings.minSentenceLength
+                speechEngine.singleCharacterMode = settings.singleCharacterMode
                 speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
 
                 translatorEngine.confidenceThreshold = settings.languageIdConfidence
@@ -505,9 +510,13 @@ class AudioCaptureService : Service() {
                 val settings = settingsRepo.settingsFlow.first()
                 isVoiceIsolationActive = settings.isVoiceIsolationEnabled
                 isQuietVoiceBoostActive = settings.isQuietVoiceBoostEnabled
+                isDebugRecordingActive = settings.isDebugAudioRecordingEnabled
                 noiseGateLevel = settings.noiseGateThreshold
                 speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
                 speechEngine.maxUtteranceWindow = settings.maxUtteranceWindow
+                speechEngine.noSpeechRestartDelay = settings.noSpeechRestartDelay
+                speechEngine.minSentenceLength = settings.minSentenceLength
+                speechEngine.singleCharacterMode = settings.singleCharacterMode
                 speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
                 translatorEngine.confidenceThreshold = settings.languageIdConfidence
             } catch (e: Exception) {
@@ -637,6 +646,24 @@ class AudioCaptureService : Service() {
                 // One resampler per capture: it carries filter state across buffers
                 val resampler = StreamingResampler(inRate = sampleRate, outRate = 16000)
                 voiceIsolationProcessor.reset()
+                // Developer option: save what the speech engine receives (files/debug/asr_input.wav)
+                val debugRecorder = if (isDebugRecordingActive) {
+                    try {
+                        val dir = java.io.File(filesDir, "debug").apply { mkdirs() }
+                        com.example.audio.WavRecorder(java.io.File(dir, "asr_input.wav")).also {
+                            Log.i(TAG, "Recording recognizer input to ${dir.absolutePath}/asr_input.wav")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not start debug recording: ${e.message}")
+                        null
+                    }
+                } else null
+                // Input level statistics, logged every 5 seconds
+                var statSamples = 0
+                var statRawSq = 0.0
+                var statSentSq = 0.0
+                var statPeak = 0f
+                var statClipped = 0
                 try {
                     record.startRecording()
                     Log.i(TAG, "Audio capture loop started successfully on dedicated thread with initialized ASR engine")
@@ -669,6 +696,28 @@ class AudioCaptureService : Service() {
                                 }
                             }
 
+                            debugRecorder?.write(processedSamples)
+                            for (i in processedSamples.indices) {
+                                val raw = floatSamples[i]
+                                val sent = processedSamples[i]
+                                statRawSq += raw * raw
+                                statSentSq += sent * sent
+                                if (kotlin.math.abs(raw) > statPeak) statPeak = kotlin.math.abs(raw)
+                                if (kotlin.math.abs(sent) >= 0.98f) statClipped++
+                            }
+                            statSamples += processedSamples.size
+                            if (statSamples >= 16000 * 5) {
+                                fun dbfs(sq: Double) = if (sq <= 0.0) -120.0 else 10 * kotlin.math.log10(sq / statSamples)
+                                Log.i(TAG, String.format(java.util.Locale.US,
+                                    "Input level (5 s): captured %.1f dBFS (peak %.1f), sent to recognizer %.1f dBFS, clipped %.2f%%, dropped chunks %d",
+                                    dbfs(statRawSq),
+                                    if (statPeak > 0f) 20 * kotlin.math.log10(statPeak.toDouble()) else -120.0,
+                                    dbfs(statSentSq),
+                                    100.0 * statClipped / statSamples,
+                                    droppedAudioChunks))
+                                statSamples = 0; statRawSq = 0.0; statSentSq = 0.0; statPeak = 0f; statClipped = 0
+                            }
+
                             // Calculate RMS dB for UI visualizer
                             val db = AudioUtils.calculateDbLevel(processedSamples)
                             _liveAudioDb.value = db
@@ -686,6 +735,7 @@ class AudioCaptureService : Service() {
                         record.stop()
                         record.release()
                     } catch (_: Exception) {}
+                    try { debugRecorder?.close() } catch (_: Exception) {}
                     audioBufferChannel.close()
                     speechEngine.flushCurrentSegment()
                     _liveAudioDb.value = 0f

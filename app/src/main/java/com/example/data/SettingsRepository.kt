@@ -25,10 +25,14 @@ data class AppSettings(
     val noiseGateThreshold: Float = 0f, // 0 = off. Range 0.000 to 0.050
 
     // ---- Developer: recognition and translation ----
-    val silenceEndpointDelay: Float = 1.2f, // seconds, 0.5 to 2.5
+    val silenceEndpointDelay: Float = 0.8f, // seconds, 0.5 to 2.5
     val maxUtteranceWindow: Float = 15.0f,  // seconds, 5 to 25
+    val noSpeechRestartDelay: Float = 1.2f, // seconds, 0.5 to 3.0: no words -> fresh stream
+    val minSentenceLength: Float = 0.0f,    // seconds, 0 to 3: shortest sentence a pause may end
+    val singleCharacterMode: Int = 0, // 0 join to next sentence, 1 drop, 2 keep as its own line
     val languageIdConfidence: Float = 0.5f, // 0.30 to 0.90
     val isAntiFreezeWatchdogEnabled: Boolean = true,
+    val isDebugAudioRecordingEnabled: Boolean = false, // saves recognizer input to files/debug
 
     // ---- User: subtitles ----
     val subtitleLingerTimeSeconds: Float = 4.0f, // 1 to 10 s, or 0 for "until the next sentence"
@@ -45,13 +49,17 @@ data class AppSettings(
 class SettingsRepository(private val context: Context) {
 
     companion object {
-        private const val SETTINGS_VERSION = 2
+        private const val SETTINGS_VERSION = 3
     }
 
     private object PreferencesKeys {
         val KEY_VOICE_ISOLATION = booleanPreferencesKey("pref_voice_isolation")
         val KEY_NOISE_GATE = floatPreferencesKey("pref_noise_gate")
         val KEY_QUIET_BOOST = booleanPreferencesKey("pref_quiet_voice_boost")
+        val KEY_NO_SPEECH_RESTART = floatPreferencesKey("pref_no_speech_restart")
+        val KEY_MIN_SENTENCE = floatPreferencesKey("pref_min_sentence_length")
+        val KEY_SINGLE_CHAR_MODE = intPreferencesKey("pref_single_char_mode")
+        val KEY_DEBUG_RECORD = booleanPreferencesKey("pref_debug_record_audio")
         val KEY_SETTINGS_VERSION = intPreferencesKey("pref_settings_version")
         val KEY_ENDPOINT_DELAY = floatPreferencesKey("pref_endpoint_delay")
         val KEY_MAX_UTTERANCE = floatPreferencesKey("pref_max_utterance")
@@ -74,8 +82,12 @@ class SettingsRepository(private val context: Context) {
             noiseGateThreshold = preferences[PreferencesKeys.KEY_NOISE_GATE] ?: d.noiseGateThreshold,
             silenceEndpointDelay = preferences[PreferencesKeys.KEY_ENDPOINT_DELAY] ?: d.silenceEndpointDelay,
             maxUtteranceWindow = preferences[PreferencesKeys.KEY_MAX_UTTERANCE] ?: d.maxUtteranceWindow,
+            noSpeechRestartDelay = preferences[PreferencesKeys.KEY_NO_SPEECH_RESTART] ?: d.noSpeechRestartDelay,
+            minSentenceLength = preferences[PreferencesKeys.KEY_MIN_SENTENCE] ?: d.minSentenceLength,
+            singleCharacterMode = preferences[PreferencesKeys.KEY_SINGLE_CHAR_MODE] ?: d.singleCharacterMode,
             languageIdConfidence = preferences[PreferencesKeys.KEY_LANG_CONFIDENCE] ?: d.languageIdConfidence,
             isAntiFreezeWatchdogEnabled = preferences[PreferencesKeys.KEY_ANTI_FREEZE] ?: d.isAntiFreezeWatchdogEnabled,
+            isDebugAudioRecordingEnabled = preferences[PreferencesKeys.KEY_DEBUG_RECORD] ?: d.isDebugAudioRecordingEnabled,
             subtitleLingerTimeSeconds = preferences[PreferencesKeys.KEY_LINGER_TIME] ?: d.subtitleLingerTimeSeconds,
             overlayOpacity = preferences[PreferencesKeys.KEY_OPACITY] ?: d.overlayOpacity,
             fontSizeSp = preferences[PreferencesKeys.KEY_FONT_SIZE] ?: d.fontSizeSp,
@@ -92,6 +104,22 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun updateQuietVoiceBoost(enabled: Boolean) {
         context.dataStore.edit { it[PreferencesKeys.KEY_QUIET_BOOST] = enabled }
+    }
+
+    suspend fun updateDebugAudioRecording(enabled: Boolean) {
+        context.dataStore.edit { it[PreferencesKeys.KEY_DEBUG_RECORD] = enabled }
+    }
+
+    suspend fun updateNoSpeechRestartDelay(seconds: Float) {
+        context.dataStore.edit { it[PreferencesKeys.KEY_NO_SPEECH_RESTART] = seconds }
+    }
+
+    suspend fun updateMinSentenceLength(seconds: Float) {
+        context.dataStore.edit { it[PreferencesKeys.KEY_MIN_SENTENCE] = seconds }
+    }
+
+    suspend fun updateSingleCharacterMode(mode: Int) {
+        context.dataStore.edit { it[PreferencesKeys.KEY_SINGLE_CHAR_MODE] = mode }
     }
 
     suspend fun updateNoiseGateThreshold(threshold: Float) {
@@ -175,8 +203,12 @@ class SettingsRepository(private val context: Context) {
                 PreferencesKeys.KEY_NOISE_GATE,
                 PreferencesKeys.KEY_ENDPOINT_DELAY,
                 PreferencesKeys.KEY_MAX_UTTERANCE,
+                PreferencesKeys.KEY_NO_SPEECH_RESTART,
+                PreferencesKeys.KEY_MIN_SENTENCE,
+                PreferencesKeys.KEY_SINGLE_CHAR_MODE,
                 PreferencesKeys.KEY_LANG_CONFIDENCE,
                 PreferencesKeys.KEY_ANTI_FREEZE,
+                PreferencesKeys.KEY_DEBUG_RECORD,
                 PreferencesKeys.KEY_TEXT_OUTLINE_SHADOW,
                 PreferencesKeys.KEY_TEXT_SHADOW_RADIUS
             ).forEach { preferences.remove(it) }

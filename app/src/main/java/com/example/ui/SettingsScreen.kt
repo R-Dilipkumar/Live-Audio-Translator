@@ -235,6 +235,34 @@ private fun DeveloperSettings(
             ) { scope.launch { repo.updateSilenceEndpointDelay(it) } }
 
             SliderSetting(
+                title = "Restart after no words",
+                subtitle = "How long with no recognized words before listening starts fresh. Shorter recovers faster after music or noise; longer avoids cutting slow speakers. Default: ${format1(defaults.noSpeechRestartDelay)} s",
+                value = settings.noSpeechRestartDelay,
+                valueText = "${format1(settings.noSpeechRestartDelay)} s",
+                range = 0.5f..3f,
+                steps = 24,
+                tag = "slider_no_speech_restart"
+            ) { scope.launch { repo.updateNoSpeechRestartDelay(it) } }
+
+            SliderSetting(
+                title = "Shortest sentence",
+                subtitle = "A pause only ends a sentence once it is at least this long, so short fragments are not translated on their own. Default: off",
+                value = settings.minSentenceLength,
+                valueText = if (settings.minSentenceLength < 0.05f) "Off" else "${format1(settings.minSentenceLength)} s",
+                range = 0f..3f,
+                steps = 29,
+                tag = "slider_min_sentence"
+            ) { scope.launch { repo.updateMinSentenceLength(it) } }
+
+            ChoiceSetting(
+                title = "One-character lines",
+                subtitle = "When a sentence ends after one character: join it to the start of the next sentence so the meaning stays whole, drop it as noise, or keep it as its own line. Default: join",
+                options = listOf(0 to "Join next", 1 to "Drop", 2 to "Keep"),
+                selected = settings.singleCharacterMode,
+                tagPrefix = "chip_single_char_"
+            ) { scope.launch { repo.updateSingleCharacterMode(it) } }
+
+            SliderSetting(
                 title = "Longest sentence",
                 subtitle = "Non-stop speech is split after this long. Default: ${defaults.maxUtteranceWindow.toInt()} s",
                 value = settings.maxUtteranceWindow,
@@ -260,6 +288,13 @@ private fun DeveloperSettings(
                 checked = settings.isAntiFreezeWatchdogEnabled,
                 tag = "toggle_anti_freeze"
             ) { scope.launch { repo.updateAntiFreezeWatchdog(it) } }
+
+            SwitchSetting(
+                title = "Save recognizer audio",
+                subtitle = "Records up to 2 minutes of the audio the speech engine receives, for troubleshooting. Default: off",
+                checked = settings.isDebugAudioRecordingEnabled,
+                tag = "toggle_debug_record"
+            ) { scope.launch { repo.updateDebugAudioRecording(it) } }
         }
 
         SettingsGroup(icon = Icons.Default.TextFields, title = "Subtitle rendering") {
@@ -360,10 +395,11 @@ private fun <T> ChoiceSetting(
     options: List<Pair<T, String>>,
     selected: T,
     tagPrefix: String,
+    subtitle: String? = null,
     onSelect: (T) -> Unit
 ) {
     Column(modifier = Modifier.padding(vertical = 6.dp)) {
-        SettingTitle(title, null, null)
+        SettingTitle(title, null, subtitle)
         Spacer(modifier = Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             options.forEach { (value, label) ->
