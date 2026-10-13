@@ -1,9 +1,11 @@
 package com.example.ui
 
-import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,445 +18,403 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Restore
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Subtitles
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.AppSettings
 import kotlinx.coroutines.launch
+import java.util.Locale
 
+/**
+ * Settings tab. The main page only has what a user needs to read subtitles comfortably.
+ * Everything that changes how audio is recognized lives under Developer settings, with its own
+ * reset, so a normal user cannot accidentally break transcription.
+ */
 @Composable
 fun SettingsScreen(
     viewModel: AudioTranslatorViewModel,
     modifier: Modifier = Modifier
 ) {
-    val settings by viewModel.appSettings.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
-    val scrollState = rememberScrollState()
-
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(scrollState)
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-            .testTag("settings_screen_container")
-    ) {
-        // Section 1: Audio Pre-Processing & Voice Isolation
-        SettingsSectionHeader(
-            icon = Icons.Default.GraphicEq,
-            title = "Audio Pre-Processing & Voice Isolation"
-        )
-
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 6.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-            ),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                // Voice Isolation Toggle
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "IIR Biquad Voice Isolation",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "Applies 150Hz high-pass filter to strip BGM rumble and 3500Hz low-pass filter to remove sound effects before speech recognition.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = settings.isVoiceIsolationEnabled,
-                        onCheckedChange = { enabled ->
-                            scope.launch { viewModel.settingsRepository.updateVoiceIsolation(enabled) }
-                        },
-                        modifier = Modifier.testTag("toggle_voice_isolation")
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Noise Gate Slider
-                Text(
-                    text = "Noise Gate Threshold: ${(settings.noiseGateThreshold * 1000).toInt()} mRMS",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Zeros out incoming audio chunks below this energy level so quiet background music or ambient noise does not trigger false speech recognition.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Slider(
-                    value = settings.noiseGateThreshold,
-                    onValueChange = { value ->
-                        scope.launch { viewModel.settingsRepository.updateNoiseGateThreshold(value) }
-                    },
-                    valueRange = 0.000f..0.050f,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("slider_noise_gate")
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Section 2: Transcription & Translation Parameters
-        SettingsSectionHeader(
-            icon = Icons.Default.RecordVoiceOver,
-            title = "Transcription & Translation Parameters"
-        )
-
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 6.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-            ),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                // Silence Endpointing Delay Slider
-                Text(
-                    text = "Silence Endpointing Delay: ${"%.1f".format(settings.silenceEndpointDelay)}s",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Controls how long a speaker must pause before finalizing a sentence clause. Higher values (e.g. 1.1s - 1.5s) prevent cutting off Japanese sentence-ending verbs.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Slider(
-                    value = settings.silenceEndpointDelay,
-                    onValueChange = { value ->
-                        scope.launch { viewModel.settingsRepository.updateSilenceEndpointDelay(value) }
-                    },
-                    valueRange = 0.5f..2.5f,
-                    steps = 19,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("slider_endpoint_delay")
-                )
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Max Utterance Window Slider
-                Text(
-                    text = "Max Utterance Window: ${settings.maxUtteranceWindow.toInt()}s",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "The maximum continuous speech duration allowed before forcing an utterance split, ensuring prompt translation for non-stop dialogue.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Slider(
-                    value = settings.maxUtteranceWindow,
-                    onValueChange = { value ->
-                        scope.launch { viewModel.settingsRepository.updateMaxUtteranceWindow(value) }
-                    },
-                    valueRange = 5.0f..25.0f,
-                    steps = 19,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("slider_max_utterance")
-                )
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Language ID Confidence Slider
-                Text(
-                    text = "Language ID Confidence: ${(settings.languageIdConfidence * 100).toInt()}%",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Minimum confidence threshold required by ML Kit before switching source languages in Auto-Detect mode, avoiding jittery false language hops.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Slider(
-                    value = settings.languageIdConfidence,
-                    onValueChange = { value ->
-                        scope.launch { viewModel.settingsRepository.updateLanguageIdConfidence(value) }
-                    },
-                    valueRange = 0.30f..0.90f,
-                    steps = 11,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("slider_lang_confidence")
-                )
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Anti-Freeze Watchdog Toggle
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Anti-Freeze Stream Watchdog",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "Monitors speech recognition and automatically resets the decoder stream if no output occurs after 6 seconds of continuous audio, preventing frozen subtitles.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = settings.isAntiFreezeWatchdogEnabled,
-                        onCheckedChange = { enabled ->
-                            scope.launch { viewModel.settingsRepository.updateAntiFreezeWatchdog(enabled) }
-                        },
-                        modifier = Modifier.testTag("toggle_anti_freeze")
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Section 3: Subtitle Timing & Display Behavior
-        SettingsSectionHeader(
-            icon = Icons.Default.Subtitles,
-            title = "Subtitle Timing & Display Behavior"
-        )
-
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 6.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-            ),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                // Subtitle Linger Time
-                Text(
-                    text = "Subtitle Linger Time: ${if (settings.subtitleLingerTimeSeconds <= 0f) "Keep until next speech" else "${"%.1f".format(settings.subtitleLingerTimeSeconds)}s"}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Controls how long translated subtitles stay visible on screen before fading away when speech stops, giving you comfortable reading time.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Slider(
-                    value = settings.subtitleLingerTimeSeconds,
-                    onValueChange = { value ->
-                        scope.launch { viewModel.settingsRepository.updateSubtitleLingerTime(value) }
-                    },
-                    valueRange = 1.0f..10.0f,
-                    steps = 17,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("slider_linger_time")
-                )
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Background Window Opacity Slider
-                Text(
-                    text = "Background Window Opacity: ${(settings.overlayOpacity * 100).toInt()}%",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Adjusts transparency of the floating overlay window so video or anime underneath remains visible without obscuring text readability.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Slider(
-                    value = settings.overlayOpacity,
-                    onValueChange = { value ->
-                        scope.launch { viewModel.settingsRepository.updateOverlayOpacity(value) }
-                    },
-                    valueRange = 0.20f..1.0f,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("slider_overlay_opacity")
-                )
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Font Size Slider
-                Text(
-                    text = "Subtitle Font Size: ${settings.fontSizeSp.toInt()} sp",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Changes the reading size of translated text in the floating overlay and in-app preview.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Slider(
-                    value = settings.fontSizeSp,
-                    onValueChange = { value ->
-                        scope.launch { viewModel.settingsRepository.updateFontSize(value) }
-                    },
-                    valueRange = 12.0f..24.0f,
-                    steps = 11,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("slider_font_size")
-                )
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Max Display Lines Control
-                Text(
-                    text = "Max Display Lines: ${settings.maxDisplayLines} Line${if (settings.maxDisplayLines > 1) "s" else ""}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Limits the maximum number of simultaneous subtitle lines visible on screen. Older lines roll off automatically as new speech arrives.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf(1, 2, 3).forEach { lines ->
-                        val isSelected = settings.maxDisplayLines == lines
-                        FilterChip(
-                            selected = isSelected,
-                            onClick = {
-                                scope.launch { viewModel.settingsRepository.updateMaxDisplayLines(lines) }
-                            },
-                            label = { Text("$lines Line${if (lines > 1) "s" else ""}") },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("chip_max_lines_$lines")
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Show Original Speech Switch
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Show Original Foreign Text",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "Displays original recognized Japanese/foreign clauses above the English translation in the floating window.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = settings.showOriginalSpeech,
-                        onCheckedChange = { show ->
-                            scope.launch { viewModel.settingsRepository.updateShowOriginalSpeech(show) }
-                        },
-                        modifier = Modifier.testTag("toggle_show_original")
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        // Reset to Defaults Button
-        OutlinedButton(
-            onClick = {
-                scope.launch { viewModel.settingsRepository.resetToDefaults() }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-                .testTag("reset_settings_button"),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(imageVector = Icons.Default.Restore, contentDescription = null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Reset All Settings to Defaults")
-        }
-
-        Spacer(modifier = Modifier.height(32.dp))
+    var showDeveloper by rememberSaveable { mutableStateOf(false) }
+    if (showDeveloper) {
+        BackHandler { showDeveloper = false }
+        DeveloperSettings(viewModel = viewModel, onBack = { showDeveloper = false }, modifier = modifier)
+    } else {
+        UserSettings(viewModel = viewModel, onOpenDeveloper = { showDeveloper = true }, modifier = modifier)
     }
 }
 
 @Composable
-private fun SettingsSectionHeader(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String
+private fun UserSettings(
+    viewModel: AudioTranslatorViewModel,
+    onOpenDeveloper: () -> Unit,
+    modifier: Modifier
+) {
+    val settings by viewModel.appSettings.collectAsStateWithLifecycle()
+    val repo = viewModel.settingsRepository
+    val scope = rememberCoroutineScope()
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .testTag("settings_screen_container"),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        SettingsGroup(icon = Icons.Default.Subtitles, title = "Subtitles") {
+            SliderSetting(
+                title = "Text size",
+                value = settings.fontSizeSp,
+                valueText = "${settings.fontSizeSp.toInt()}",
+                range = 12f..26f,
+                steps = 13,
+                tag = "slider_font_size"
+            ) { scope.launch { repo.updateFontSize(it) } }
+
+            ChoiceSetting(
+                title = "Lines shown",
+                options = listOf(1 to "1 line", 2 to "2 lines", 3 to "3 lines"),
+                selected = settings.maxDisplayLines,
+                tagPrefix = "chip_max_lines_"
+            ) { scope.launch { repo.updateMaxDisplayLines(it) } }
+
+            ChoiceSetting(
+                title = "Keep subtitles on screen",
+                options = listOf(2f to "2 s", 4f to "4 s", 7f to "7 s", 0f to "Until next"),
+                selected = LINGER_CHOICES.minByOrNull { kotlin.math.abs(it - settings.subtitleLingerTimeSeconds) } ?: 4f,
+                tagPrefix = "chip_linger_"
+            ) { scope.launch { repo.updateSubtitleLingerTime(it) } }
+
+            SliderSetting(
+                title = "Background",
+                value = settings.overlayOpacity,
+                valueText = "${(settings.overlayOpacity * 100).toInt()}%",
+                range = 0.2f..1f,
+                tag = "slider_overlay_opacity"
+            ) { scope.launch { repo.updateOverlayOpacity(it) } }
+
+            SwitchSetting(
+                title = "Show original speech",
+                subtitle = "Show what was said above the translation",
+                checked = settings.showOriginalSpeech,
+                tag = "toggle_show_original"
+            ) { scope.launch { repo.updateShowOriginalSpeech(it) } }
+        }
+
+        ResetButton(text = "Reset to defaults", tag = "reset_settings_button") {
+            scope.launch { repo.resetUserDefaults() }
+        }
+
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpenDeveloper)
+                .testTag("open_developer_settings")
+        ) {
+            Row(
+                modifier = Modifier.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Build, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Developer settings", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Audio and recognition tuning. The defaults work for most audio.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun DeveloperSettings(
+    viewModel: AudioTranslatorViewModel,
+    onBack: () -> Unit,
+    modifier: Modifier
+) {
+    val settings by viewModel.appSettings.collectAsStateWithLifecycle()
+    val repo = viewModel.settingsRepository
+    val scope = rememberCoroutineScope()
+    val defaults = AppSettings()
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("developer_settings_container"),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack, modifier = Modifier.testTag("developer_settings_back")) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            Column {
+                Text("Developer settings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "Changes apply the next time subtitles start.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        SettingsGroup(icon = Icons.Default.GraphicEq, title = "Audio") {
+            SwitchSetting(
+                title = "Boost quiet voices",
+                subtitle = "Raises soft, breathy or husky speech to a normal level (up to +18 dB). Default: on",
+                checked = settings.isQuietVoiceBoostEnabled,
+                tag = "toggle_quiet_boost"
+            ) { scope.launch { repo.updateQuietVoiceBoost(it) } }
+
+            SwitchSetting(
+                title = "Remove low rumble",
+                subtitle = "Filters hum and deep bass below 80 Hz. Speech is not affected. Default: on",
+                checked = settings.isVoiceIsolationEnabled,
+                tag = "toggle_voice_isolation"
+            ) { scope.launch { repo.updateVoiceIsolation(it) } }
+
+            SliderSetting(
+                title = "Background noise gate",
+                subtitle = "Turns down quiet sound between sentences. Can cut soft speakers. Default: off",
+                value = settings.noiseGateThreshold,
+                valueText = if (settings.noiseGateThreshold <= 0.0005f) "Off" else "${(settings.noiseGateThreshold * 1000).toInt()}",
+                range = 0f..0.05f,
+                tag = "slider_noise_gate"
+            ) { scope.launch { repo.updateNoiseGateThreshold(if (it < 0.001f) 0f else it) } }
+        }
+
+        SettingsGroup(icon = Icons.Default.RecordVoiceOver, title = "Recognition and translation") {
+            SliderSetting(
+                title = "Pause that ends a sentence",
+                subtitle = "Longer keeps sentences together; shorter shows translations sooner. Default: ${format1(defaults.silenceEndpointDelay)} s",
+                value = settings.silenceEndpointDelay,
+                valueText = "${format1(settings.silenceEndpointDelay)} s",
+                range = 0.5f..2.5f,
+                steps = 19,
+                tag = "slider_endpoint_delay"
+            ) { scope.launch { repo.updateSilenceEndpointDelay(it) } }
+
+            SliderSetting(
+                title = "Longest sentence",
+                subtitle = "Non-stop speech is split after this long. Default: ${defaults.maxUtteranceWindow.toInt()} s",
+                value = settings.maxUtteranceWindow,
+                valueText = "${settings.maxUtteranceWindow.toInt()} s",
+                range = 5f..25f,
+                steps = 19,
+                tag = "slider_max_utterance"
+            ) { scope.launch { repo.updateMaxUtteranceWindow(it) } }
+
+            SliderSetting(
+                title = "Auto-detect certainty",
+                subtitle = "How sure language detection must be before switching language. Default: ${(defaults.languageIdConfidence * 100).toInt()}%",
+                value = settings.languageIdConfidence,
+                valueText = "${(settings.languageIdConfidence * 100).toInt()}%",
+                range = 0.3f..0.9f,
+                steps = 11,
+                tag = "slider_lang_confidence"
+            ) { scope.launch { repo.updateLanguageIdConfidence(it) } }
+
+            SwitchSetting(
+                title = "Recover from stalls",
+                subtitle = "Restart recognition if audio flows but no new words appear for 8 s. Default: on",
+                checked = settings.isAntiFreezeWatchdogEnabled,
+                tag = "toggle_anti_freeze"
+            ) { scope.launch { repo.updateAntiFreezeWatchdog(it) } }
+        }
+
+        SettingsGroup(icon = Icons.Default.TextFields, title = "Subtitle rendering") {
+            SwitchSetting(
+                title = "Text shadow",
+                subtitle = "Keeps text readable over bright video. Default: on",
+                checked = settings.isTextOutlineShadowEnabled,
+                tag = "toggle_text_shadow"
+            ) { scope.launch { repo.updateTextOutlineShadow(it) } }
+
+            SliderSetting(
+                title = "Shadow softness",
+                value = settings.textShadowRadius,
+                valueText = format1(settings.textShadowRadius),
+                range = 0f..10f,
+                steps = 9,
+                tag = "slider_shadow_radius"
+            ) { scope.launch { repo.updateTextShadowRadius(it) } }
+        }
+
+        ResetButton(text = "Reset developer settings", tag = "reset_developer_settings_button") {
+            scope.launch { repo.resetDeveloperDefaults() }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+}
+
+private val LINGER_CHOICES = listOf(2f, 4f, 7f, 0f)
+
+private fun format1(value: Float) = String.format(Locale.US, "%.1f", value)
+
+@Composable
+private fun SettingsGroup(
+    icon: ImageVector,
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SettingTitle(title: String, valueText: String?, subtitle: String?) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+        if (valueText != null) {
+            Text(valueText, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        }
+    }
+    if (subtitle != null) {
+        Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun SliderSetting(
+    title: String,
+    value: Float,
+    valueText: String,
+    range: ClosedFloatingPointRange<Float>,
+    tag: String,
+    subtitle: String? = null,
+    steps: Int = 0,
+    onChange: (Float) -> Unit
+) {
+    Column(modifier = Modifier.padding(vertical = 6.dp)) {
+        SettingTitle(title, valueText, subtitle)
+        Slider(
+            value = value.coerceIn(range.start, range.endInclusive),
+            onValueChange = onChange,
+            valueRange = range,
+            steps = steps,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(tag)
+        )
+    }
+}
+
+@Composable
+private fun <T> ChoiceSetting(
+    title: String,
+    options: List<Pair<T, String>>,
+    selected: T,
+    tagPrefix: String,
+    onSelect: (T) -> Unit
+) {
+    Column(modifier = Modifier.padding(vertical = 6.dp)) {
+        SettingTitle(title, null, null)
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            options.forEach { (value, label) ->
+                FilterChip(
+                    selected = value == selected,
+                    onClick = { onSelect(value) },
+                    label = { Text(label) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("$tagPrefix$value")
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SwitchSetting(
+    title: String,
+    subtitle: String?,
+    checked: Boolean,
+    tag: String,
+    onChange: (Boolean) -> Unit
 ) {
     Row(
-        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp)
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(20.dp)
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            SettingTitle(title, null, subtitle)
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onChange, modifier = Modifier.testTag(tag))
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+}
+
+@Composable
+private fun ResetButton(text: String, tag: String, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .testTag(tag)
+    ) {
+        Icon(Icons.Default.Restore, contentDescription = null)
         Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary
-        )
+        Text(text)
     }
 }

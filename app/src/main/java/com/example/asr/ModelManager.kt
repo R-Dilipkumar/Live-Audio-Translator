@@ -26,45 +26,34 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
-enum class ModelTier(
-    val label: String,
-    val badge: String,
-    val icon: String,
-    val description: String
-) {
-    FAST(
-        label = "Fast / Low-Latency",
-        badge = "⚡ Fast (100ms)",
-        icon = "⚡",
-        description = "Optimized for instant 100ms response, low battery, and fast-paced action games."
-    ),
-    CINEMATIC(
-        label = "High Accuracy / Cinematic",
-        badge = "🎯 Cinematic",
-        icon = "🎯",
-        description = "Optimized for complex sentence grammar, anime/movie dialogue, and dialect recognition."
-    )
-}
-
+/**
+ * A streaming (live) Zipformer transducer model for Sherpa-ONNX.
+ *
+ * totalSizeBytes is the exact archive size on the server (what the download shows).
+ * The four file names match the files inside the archive. memoryMb is roughly the size of those
+ * files, which is about what the model takes in RAM once loaded.
+ */
 data class AsrModelConfig(
     val id: String,
     val name: String,
+    // Main language code ("multi" for the multilingual model)
     val languageCode: String,
+    // Languages it recognizes, for display
+    val languages: List<String>,
     val description: String,
     val downloadUrl: String,
     val totalSizeBytes: Long,
+    val memoryMb: Int,
     val encoderFilename: String,
     val decoderFilename: String,
     val joinerFilename: String,
-    val tokensFilename: String,
+    val tokensFilename: String = "tokens.txt",
     val isMultilingual: Boolean = false,
-    val category: String = "Monolingual",
-    val tier: ModelTier = ModelTier.FAST,
-    val latencyProfile: String = "~100ms",
-    val ramProfile: String = "~50MB RAM",
-    // Sherpa-ONNX transducer type: "zipformer" (icefall pruned_transducer_stateless7_streaming exports)
-    // or "zipformer2" (newer icefall zipformer exports). Empty means sherpa-onnx reads the
-    // "model_type" entry from the encoder's ONNX metadata, which every icefall export carries.
+    // Output includes punctuation and capital letters (better subtitles and translation)
+    val hasPunctuation: Boolean = false,
+    val license: String = "Apache-2.0",
+    // Sherpa-ONNX transducer type. Empty means sherpa-onnx reads the "model_type" entry from the
+    // encoder's ONNX metadata, which every model here carries.
     val modelType: String = ""
 )
 
@@ -98,186 +87,146 @@ class ModelManager(private val context: Context) {
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    // Pre-configured lightweight streaming ASR models categorized into Fast and Cinematic tiers
+    // One streaming model per language: the most accurate streaming Zipformer published for it
+    // (k2-fsa/sherpa-onnx "asr-models" release, checked 2026-10-13), plus one multilingual model.
+    // Japanese, Thai, Vietnamese, Arabic and Indonesian have no dedicated streaming Zipformer;
+    // the multilingual model covers them.
     val availableModels: List<AsrModelConfig> = listOf(
-        // ==========================================
-        // 1. MULTILINGUAL (Auto-Detect Universal)
-        // ==========================================
         AsrModelConfig(
             id = "zipformer_multilingual_universal",
-            name = "Multilingual Streaming Zipformer (Auto-Detect)",
-            languageCode = "auto",
-            description = "Universal multilingual streaming recognizer supporting auto-detection across Arabic, English, Indonesian, Japanese, Russian, Thai, Vietnamese, and Chinese (approx. 128 MB)",
-            downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10.tar.bz2",
-            totalSizeBytes = 134_200_000L,
-            encoderFilename = "encoder-epoch-75-avg-11-chunk-16-left-128.onnx",
+            name = "Multilingual",
+            languageCode = "multi",
+            languages = listOf("Japanese", "Chinese", "English", "Russian", "Arabic", "Thai", "Vietnamese", "Indonesian"),
+            description = "One model for 8 languages, switches automatically. The only streaming Zipformer that covers Japanese. PengChengStarling, 2025.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10.tar.bz2",
+            totalSizeBytes = 258_999_581L,
+            memoryMb = 325,
+            encoderFilename = "encoder-epoch-75-avg-11-chunk-16-left-128.int8.onnx",
             decoderFilename = "decoder-epoch-75-avg-11-chunk-16-left-128.onnx",
-            joinerFilename = "joiner-epoch-75-avg-11-chunk-16-left-128.onnx",
-            tokensFilename = "tokens.txt",
-            isMultilingual = true,
-            category = "Multilingual / Auto-Detect",
-            tier = ModelTier.FAST,
-            latencyProfile = "⚡ ~110ms",
-            ramProfile = "💾 ~65MB RAM"
+            joinerFilename = "joiner-epoch-75-avg-11-chunk-16-left-128.int8.onnx",
+            isMultilingual = true
         ),
-
-        // ==========================================
-        // 2. ENGLISH FAST (20M)
-        // ==========================================
         AsrModelConfig(
-            id = "zipformer_en_fast",
-            name = "English Fast Streaming Zipformer (20M)",
+            id = "kroko_en",
+            name = "English",
             languageCode = "en",
-            description = "Instantaneous response time for fast gaming commentary and action scenes (approx. 42 MB)",
-            downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
-            totalSizeBytes = 44_200_000L,
-            encoderFilename = "encoder-epoch-99-avg-1.onnx",
-            decoderFilename = "decoder-epoch-99-avg-1.onnx",
-            joinerFilename = "joiner-epoch-99-avg-1.onnx",
-            tokensFilename = "tokens.txt",
-            isMultilingual = false,
-            category = "English",
-            tier = ModelTier.FAST,
-            latencyProfile = "⚡ ~85ms",
-            ramProfile = "💾 ~40MB RAM",
-            modelType = "zipformer"
+            languages = listOf("English"),
+            description = "Kroko community model trained on real-world speech, with punctuation and capitals. 2025.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2",
+            totalSizeBytes = 57_267_600L,
+            memoryMb = 70,
+            encoderFilename = "encoder.onnx",
+            decoderFilename = "decoder.onnx",
+            joinerFilename = "joiner.onnx",
+            hasPunctuation = true,
+            license = "CC-BY-SA (Kroko community)"
         ),
-
-        // ==========================================
-        // 3. ENGLISH CINEMATIC
-        // ==========================================
         AsrModelConfig(
-            id = "zipformer_en_cinematic",
-            name = "English Cinematic Dialogue Zipformer",
-            languageCode = "en",
-            description = "High-accuracy ASR optimized for conversational nuance, accents, and film dialogue (approx. 92 MB)",
-            downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
-            totalSizeBytes = 96_500_000L,
-            encoderFilename = "encoder-epoch-99-avg-1.int8.onnx",
-            decoderFilename = "decoder-epoch-99-avg-1.onnx",
-            joinerFilename = "joiner-epoch-99-avg-1.int8.onnx",
-            tokensFilename = "tokens.txt",
-            isMultilingual = false,
-            category = "English",
-            tier = ModelTier.CINEMATIC,
-            latencyProfile = "🎯 ~190ms",
-            ramProfile = "💾 ~90MB RAM",
-            modelType = "zipformer2"
-        ),
-
-        // ==========================================
-        // 4. CHINESE FAST (14M)
-        // ==========================================
-        AsrModelConfig(
-            id = "zipformer_zh_fast",
-            name = "Chinese Fast Streaming Zipformer (14M)",
+            id = "xasr_zh_en",
+            name = "Chinese",
             languageCode = "zh",
-            description = "Ultra-fast Mandarin recognition with minimal memory footprint (approx. 32 MB)",
-            downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23.tar.bz2",
-            totalSizeBytes = 33_500_000L,
-            encoderFilename = "encoder-epoch-99-avg-1.int8.onnx",
-            decoderFilename = "decoder-epoch-99-avg-1.onnx",
-            joinerFilename = "joiner-epoch-99-avg-1.int8.onnx",
-            tokensFilename = "tokens.txt",
-            isMultilingual = false,
-            category = "Chinese",
-            tier = ModelTier.FAST,
-            latencyProfile = "⚡ ~90ms",
-            ramProfile = "💾 ~38MB RAM",
-            modelType = "zipformer"
+            languages = listOf("Chinese", "English"),
+            description = "X-ASR, trained on about 1 million hours. Handles Chinese with English mixed in, with punctuation. 2026.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+            totalSizeBytes = 133_895_136L,
+            memoryMb = 160,
+            encoderFilename = "encoder.int8.onnx",
+            decoderFilename = "decoder.onnx",
+            joinerFilename = "joiner.int8.onnx",
+            hasPunctuation = true
         ),
-
-        // ==========================================
-        // 5. CHINESE & ENGLISH BILINGUAL
-        // ==========================================
-        AsrModelConfig(
-            id = "zipformer_bilingual_zh_en",
-            name = "Chinese & English Bilingual Streaming Zipformer",
-            languageCode = "zh",
-            description = "High-accuracy dual-language recognizer for code-switching and bilingual dialogue (approx. 115 MB)",
-            downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2",
-            totalSizeBytes = 120_500_000L,
-            encoderFilename = "encoder-epoch-99-avg-1.int8.onnx",
-            decoderFilename = "decoder-epoch-99-avg-1.onnx",
-            joinerFilename = "joiner-epoch-99-avg-1.int8.onnx",
-            tokensFilename = "tokens.txt",
-            isMultilingual = false,
-            category = "Bilingual (ZH/EN)",
-            tier = ModelTier.CINEMATIC,
-            latencyProfile = "🎯 ~200ms",
-            ramProfile = "💾 ~95MB RAM",
-            modelType = "zipformer"
-        ),
-
-        // ==========================================
-        // 6. FRENCH FAST
-        // ==========================================
-        AsrModelConfig(
-            id = "zipformer_fr",
-            name = "French Streaming Zipformer",
-            languageCode = "fr",
-            description = "Real-time French streaming speech recognition with low latency (approx. 95 MB)",
-            downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-fr-2023-04-14.tar.bz2",
-            totalSizeBytes = 95_000_000L,
-            encoderFilename = "encoder-epoch-29-avg-9-with-head-epoch-29.int8.onnx",
-            decoderFilename = "decoder-epoch-29-avg-9-with-head-epoch-29.onnx",
-            joinerFilename = "joiner-epoch-29-avg-9-with-head-epoch-29.int8.onnx",
-            tokensFilename = "tokens.txt",
-            isMultilingual = false,
-            category = "French",
-            tier = ModelTier.FAST,
-            latencyProfile = "⚡ ~110ms",
-            ramProfile = "💾 ~55MB RAM",
-            modelType = "zipformer"
-        ),
-
-        // ==========================================
-        // 7. KOREAN FAST
-        // ==========================================
         AsrModelConfig(
             id = "zipformer_ko",
-            name = "Korean Streaming Zipformer",
+            name = "Korean",
             languageCode = "ko",
-            description = "Real-time Korean streaming speech recognition for K-dramas, gaming, and media (approx. 85 MB)",
-            downloadUrl = "https://huggingface.co/xumo/onnx_models/resolve/main/sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2",
-            totalSizeBytes = 85_000_000L,
+            languages = listOf("Korean"),
+            description = "Trained on KsponSpeech conversational Korean. 2024.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2",
+            totalSizeBytes = 418_218_652L,
+            memoryMb = 135,
             encoderFilename = "encoder-epoch-99-avg-1.int8.onnx",
             decoderFilename = "decoder-epoch-99-avg-1.onnx",
-            joinerFilename = "joiner-epoch-99-avg-1.int8.onnx",
-            tokensFilename = "tokens.txt",
-            isMultilingual = false,
-            category = "Korean",
-            tier = ModelTier.FAST,
-            latencyProfile = "⚡ ~105ms",
-            ramProfile = "💾 ~50MB RAM"
+            joinerFilename = "joiner-epoch-99-avg-1.int8.onnx"
         ),
-
-        // ==========================================
-        // 8. BENGALI FAST
-        // ==========================================
+        AsrModelConfig(
+            id = "kroko_es",
+            name = "Spanish",
+            languageCode = "es",
+            languages = listOf("Spanish"),
+            description = "Kroko community model trained on real-world speech, with punctuation and capitals. 2025.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-streaming-zipformer-es-kroko-2025-08-06.tar.bz2",
+            totalSizeBytes = 124_394_665L,
+            memoryMb = 150,
+            encoderFilename = "encoder.onnx",
+            decoderFilename = "decoder.onnx",
+            joinerFilename = "joiner.onnx",
+            hasPunctuation = true,
+            license = "CC-BY-SA (Kroko community)"
+        ),
+        AsrModelConfig(
+            id = "kroko_fr",
+            name = "French",
+            languageCode = "fr",
+            languages = listOf("French"),
+            description = "Kroko community model trained on real-world speech, with punctuation and capitals. 2025.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-streaming-zipformer-fr-kroko-2025-08-06.tar.bz2",
+            totalSizeBytes = 57_220_361L,
+            memoryMb = 70,
+            encoderFilename = "encoder.onnx",
+            decoderFilename = "decoder.onnx",
+            joinerFilename = "joiner.onnx",
+            hasPunctuation = true,
+            license = "CC-BY-SA (Kroko community)"
+        ),
+        AsrModelConfig(
+            id = "kroko_de",
+            name = "German",
+            languageCode = "de",
+            languages = listOf("German"),
+            description = "Kroko community model trained on real-world speech, with punctuation and capitals. 2025.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06.tar.bz2",
+            totalSizeBytes = 57_565_698L,
+            memoryMb = 70,
+            encoderFilename = "encoder.onnx",
+            decoderFilename = "decoder.onnx",
+            joinerFilename = "joiner.onnx",
+            hasPunctuation = true,
+            license = "CC-BY-SA (Kroko community)"
+        ),
+        AsrModelConfig(
+            id = "vosk_ru",
+            name = "Russian",
+            languageCode = "ru",
+            languages = listOf("Russian"),
+            description = "Vosk Russian streaming model (full precision). 2025.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-streaming-zipformer-small-ru-vosk-2025-08-16.tar.bz2",
+            totalSizeBytes = 89_653_224L,
+            memoryMb = 90,
+            encoderFilename = "encoder.onnx",
+            decoderFilename = "decoder.onnx",
+            joinerFilename = "joiner.onnx"
+        ),
         AsrModelConfig(
             id = "zipformer_bn",
-            name = "Bengali Streaming Zipformer",
+            name = "Bengali",
             languageCode = "bn",
-            description = "Real-time Bengali streaming speech recognition based on Vosk data (approx. 80 MB)",
-            downloadUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09.tar.bz2",
-            totalSizeBytes = 80_000_000L,
-            encoderFilename = "encoder-epoch-99-avg-1.int8.onnx",
-            decoderFilename = "decoder-epoch-99-avg-1.onnx",
-            joinerFilename = "joiner-epoch-99-avg-1.int8.onnx",
-            tokensFilename = "tokens.txt",
-            isMultilingual = false,
-            category = "Bengali",
-            tier = ModelTier.FAST,
-            latencyProfile = "⚡ ~100ms",
-            ramProfile = "💾 ~45MB RAM"
+            languages = listOf("Bengali"),
+            description = "Vosk Bengali streaming model. 2026.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-streaming-zipformer-bn-vosk-2026-02-09.tar.bz2",
+            totalSizeBytes = 87_289_525L,
+            memoryMb = 90,
+            encoderFilename = "encoder.onnx",
+            decoderFilename = "decoder.onnx",
+            joinerFilename = "joiner.onnx"
         )
     )
 
     companion object {
-        // Model installed on first launch (~42 MB). This is the model the old flat
-        // models/sherpa-onnx folder was always downloaded from.
-        const val DEFAULT_MODEL_ID = "zipformer_en_fast"
+        // Official sherpa-onnx model release (GitHub)
+        const val RELEASE_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models"
+
+        // Default selection on a fresh install
+        const val DEFAULT_MODEL_ID = "zipformer_multilingual_universal"
 
         // Old storage layout: one flat folder shared by every model. Only read by the migration.
         const val LEGACY_FLAT_DIR = "models/sherpa-onnx"
@@ -298,9 +247,13 @@ class ModelManager(private val context: Context) {
     private val _downloadState = MutableStateFlow<ModelDownloadState>(ModelDownloadState.NotDownloaded)
     val downloadState: StateFlow<ModelDownloadState> = _downloadState.asStateFlow()
 
-    // Progress of the first-launch download (shown in the onboarding dialog, with speed).
-    private val _setupDownloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
-    val setupDownloadState: StateFlow<DownloadState> = _setupDownloadState.asStateFlow()
+    // Id of the model being downloaded or unpacked, or null. Only one download runs at a time.
+    private val _activeDownloadId = MutableStateFlow<String?>(null)
+    val activeDownloadId: StateFlow<String?> = _activeDownloadId.asStateFlow()
+
+    // True once the startup scan of installed models has finished.
+    private val _hasScannedModels = MutableStateFlow(false)
+    val hasScannedModels: StateFlow<Boolean> = _hasScannedModels.asStateFlow()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -317,19 +270,19 @@ class ModelManager(private val context: Context) {
         scope.launch {
             migrateLegacyFlatInstall()
             cleanupOrphanedTempFiles()
-            refreshAvailableStorage()
             val ready = refreshReadyModels()
+            // Free space taken by files of earlier installs that are never loaded
+            availableModels.filter { it.id in ready }.forEach { pruneUnusedFiles(it) }
+            refreshAvailableStorage()
             chooseInitialSelectionIfUnset(ready)
+            _hasScannedModels.value = true
         }
     }
 
     /**
-     * Moves an install from the old flat models/sherpa-onnx folder into the per-model folder
-     * models/<model id>/, so every model lives in exactly one place.
-     *
-     * The flat folder was only ever filled from the English 20M model URL, so a complete install
-     * there is treated as [DEFAULT_MODEL_ID] after a tokens.txt sanity check (that model uses a
-     * 500-entry BPE vocabulary). Anything that fails the check is deleted, not guessed at.
+     * Removes model files that no current catalogue entry can load:
+     * - the old flat models/sherpa-onnx folder (it held the retired English 20M model), and
+     * - folders of models that were dropped from the catalogue.
      * Runs once per process; safe to call from any thread.
      */
     fun migrateLegacyFlatInstall() {
@@ -339,62 +292,32 @@ class ModelManager(private val context: Context) {
             try {
                 val legacyDir = File(context.filesDir, LEGACY_FLAT_DIR)
                 if (legacyDir.exists()) {
-                    val target = availableModels.first { it.id == DEFAULT_MODEL_ID }
-                    val targetDir = getModelDirectory(target)
-                    when {
-                        resolveFilesInModelDir(target) != null -> {
-                            Log.i(TAG, "Legacy flat model folder duplicates ${target.id}; deleting it")
-                            legacyDir.deleteRecursively()
-                        }
-                        isLegacyInstallOfDefaultModel(legacyDir) -> {
-                            if (targetDir.exists()) targetDir.deleteRecursively()
-                            val moved = legacyDir.renameTo(targetDir) ||
-                                (legacyDir.copyRecursively(targetDir, overwrite = true) && legacyDir.deleteRecursively())
-                            Log.i(TAG, "Migrated legacy flat model folder into ${targetDir.name}: $moved")
-                            if (!moved) {
-                                targetDir.deleteRecursively()
-                                legacyDir.deleteRecursively()
-                            }
-                        }
-                        else -> {
-                            Log.w(TAG, "Legacy flat model folder could not be identified; deleting it")
-                            legacyDir.deleteRecursively()
-                        }
+                    Log.i(TAG, "Deleting legacy flat model folder (retired model)")
+                    legacyDir.deleteRecursively()
+                }
+                val knownIds = availableModels.map { it.id }.toSet()
+                getModelsDirectory().listFiles()?.forEach { dir ->
+                    if (dir.isDirectory && dir.name !in knownIds) {
+                        Log.i(TAG, "Deleting retired model folder ${dir.name}")
+                        dir.deleteRecursively()
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Legacy model migration failed: ${e.message}")
+                Log.w(TAG, "Legacy model cleanup failed: ${e.message}")
             } finally {
                 legacyMigrationDone = true
             }
         }
     }
 
-    private fun isLegacyInstallOfDefaultModel(dir: File): Boolean {
-        val encoder = findFileByKeyword(dir, "encoder")
-        val decoder = findFileByKeyword(dir, "decoder")
-        val joiner = findFileByKeyword(dir, "joiner")
-        val tokens = findFileByKeyword(dir, "tokens")
-        if (!hasUsableModelFile(encoder, 1_000_000L) ||
-            !hasUsableModelFile(decoder, 100_000L) ||
-            !hasUsableModelFile(joiner, 10_000L) ||
-            !hasUsableModelFile(tokens, 10L)
-        ) return false
-        val tokenCount = try {
-            tokens!!.useLines { lines -> lines.count { it.isNotBlank() } }
-        } catch (_: Exception) {
-            return false
-        }
-        return tokenCount in 400..600
-    }
-
     /**
-     * On the first run after this change there is no saved selection. Prefer the default model if
-     * it is installed, otherwise any installed model, so an existing install keeps working.
+     * When there is no saved selection (first run, or the saved model was retired), prefer the
+     * default model if it is installed, otherwise any installed model.
      */
     private fun chooseInitialSelectionIfUnset(ready: Set<String>) {
         synchronized(selectionLock) {
-            if (prefs.contains(KEY_SELECTED_MODEL_ID)) return
+            val saved = prefs.getString(KEY_SELECTED_MODEL_ID, null)
+            if (saved != null && availableModels.any { it.id == saved }) return
             val pick = availableModels.firstOrNull { it.id == DEFAULT_MODEL_ID && it.id in ready }
                 ?: availableModels.firstOrNull { it.id in ready }
                 ?: return
@@ -545,9 +468,9 @@ class ModelManager(private val context: Context) {
     private fun resolveFilesInModelDir(model: AsrModelConfig): ResolvedModelFiles? {
         val dir = getModelDirectory(model)
         if (dir.exists() && dir.isDirectory) {
-            val encoder = findFileInDir(dir, model.encoderFilename) ?: findFileByKeyword(dir, "encoder")
-            val decoder = findFileInDir(dir, model.decoderFilename) ?: findFileByKeyword(dir, "decoder")
-            val joiner = findFileInDir(dir, model.joinerFilename) ?: findFileByKeyword(dir, "joiner")
+            val encoder = findFileInDir(dir, model.encoderFilename) ?: findOnnxByKeyword(dir, "encoder")
+            val decoder = findFileInDir(dir, model.decoderFilename) ?: findOnnxByKeyword(dir, "decoder")
+            val joiner = findFileInDir(dir, model.joinerFilename) ?: findOnnxByKeyword(dir, "joiner")
             val tokens = findFileInDir(dir, model.tokensFilename) ?: findFileByKeyword(dir, "tokens.txt")
 
             if (encoder != null && decoder != null && joiner != null && tokens != null &&
@@ -560,6 +483,40 @@ class ModelManager(private val context: Context) {
             }
         }
         return null
+    }
+
+    /**
+     * Fallback when a configured file name is not in the archive: picks an ONNX file containing
+     * [keyword] the same way every time, preferring the int8 (smaller) variant.
+     */
+    private fun findOnnxByKeyword(dir: File, keyword: String): File? {
+        return dir.walkTopDown()
+            .filter { it.isFile && it.name.contains(keyword, ignoreCase = true) && it.name.endsWith(".onnx", ignoreCase = true) }
+            .sortedWith(compareBy<File>({ !it.name.contains(".int8.", ignoreCase = true) }, { it.name }))
+            .firstOrNull()
+    }
+
+    /**
+     * Deletes everything in the model's folder except the four files that are loaded
+     * (archives also ship other precision variants, test audio and scripts).
+     */
+    fun pruneUnusedFiles(model: AsrModelConfig) {
+        val resolved = resolveFilesInModelDir(model) ?: return
+        val keep = listOf(resolved.encoderFile, resolved.decoderFile, resolved.joinerFile, resolved.tokensFile)
+            .map { it.canonicalPath }
+            .toSet()
+        val dir = getModelDirectory(model)
+        var freed = 0L
+        dir.walkBottomUp().forEach { file ->
+            if (file == dir) return@forEach
+            if (file.isFile && file.canonicalPath !in keep) {
+                freed += file.length()
+                file.delete()
+            } else if (file.isDirectory && file.listFiles().isNullOrEmpty()) {
+                file.delete()
+            }
+        }
+        if (freed > 0) Log.i(TAG, "Removed ${freed / (1024 * 1024)} MB of unused files from ${model.id}")
     }
 
     /**
@@ -581,40 +538,30 @@ class ModelManager(private val context: Context) {
 
     /**
      * Downloads and installs [model] into its own folder, models/<model id>/, with byte-level
-     * progress reporting. With [reportSetupProgress], progress is also published on
-     * [setupDownloadState] for the first-launch dialog.
+     * progress reporting. Files in the archive that the app never loads are deleted afterwards.
      */
-    suspend fun downloadModel(
-        model: AsrModelConfig = _selectedModel.value,
-        reportSetupProgress: Boolean = false
-    ) = withContext(Dispatchers.IO) {
+    suspend fun downloadModel(model: AsrModelConfig = _selectedModel.value) = withContext(Dispatchers.IO) {
+        synchronized(this@ModelManager) {
+            if (_activeDownloadId.value != null) {
+                Log.w(TAG, "Download of ${model.id} ignored: ${_activeDownloadId.value} is still downloading")
+                return@withContext
+            }
+            _activeDownloadId.value = model.id
+        }
         val targetDir = getModelDirectory(model)
         val tempArchiveFile = File(getModelsDirectory(), "${model.id}_temp.archive")
-        var speedBytesPerSec = 0L
 
         fun report(state: ModelDownloadState) {
             _downloadState.value = state
-            if (!reportSetupProgress) return
-            _setupDownloadState.value = when (state) {
-                is ModelDownloadState.Downloading -> DownloadState.Downloading(
-                    progress = state.progress,
-                    speedBytesPerSec = speedBytesPerSec,
-                    bytesDownloaded = state.bytesDownloaded,
-                    totalBytes = state.totalBytes
-                )
-                is ModelDownloadState.Extracting -> DownloadState.Extracting
-                is ModelDownloadState.Ready -> DownloadState.Ready
-                is ModelDownloadState.Error -> DownloadState.Error(state.errorMsg)
-                ModelDownloadState.NotDownloaded -> DownloadState.Idle
-            }
         }
 
         try {
-            // Requirement 1: Storage pre-flight check using StatFs (require at least 150MB free)
-            val availableMb = getAvailableStorageMb()
-            val minRequiredMb = 150L
+            // Storage pre-flight check: the archive plus its unpacked files must fit before the
+            // unused files are deleted. Unpacked files are up to about twice the archive size.
+            val availableMb = refreshAvailableStorage()
+            val minRequiredMb = maxOf(150L, (model.totalSizeBytes * 3) / (1024L * 1024L))
             if (availableMb < minRequiredMb) {
-                val error = "Insufficient storage space: At least 150MB of free space is required for offline models (Available: ${availableMb}MB)."
+                val error = "Insufficient storage space: About ${minRequiredMb}MB of free space is needed to install this model (Available: ${availableMb}MB)."
                 report(ModelDownloadState.Error(error))
                 NotificationHelper.showErrorNotification(context, "Storage Check Failed", error)
                 return@withContext
@@ -650,18 +597,10 @@ class ModelManager(private val context: Context) {
                         val buffer = ByteArray(32 * 1024)
                         var bytesRead: Int
                         var totalRead = 0L
-                        var lastSpeedTime = System.currentTimeMillis()
-                        var lastSpeedBytes = 0L
 
                         while (input.read(buffer).also { bytesRead = it } != -1) {
                             output.write(buffer, 0, bytesRead)
                             totalRead += bytesRead
-                            val now = System.currentTimeMillis()
-                            if (now - lastSpeedTime >= 350) {
-                                speedBytesPerSec = ((totalRead - lastSpeedBytes) * 1000L) / (now - lastSpeedTime)
-                                lastSpeedTime = now
-                                lastSpeedBytes = totalRead
-                            }
                             val progress = if (contentLength > 0) (totalRead.toFloat() / contentLength.toFloat()).coerceIn(0f, 1f) else 0f
                             report(ModelDownloadState.Downloading(totalRead, contentLength, progress))
                         }
@@ -698,6 +637,7 @@ class ModelManager(private val context: Context) {
 
             // Verify installation
             if (checkModelFilesOnDisk(model)) {
+                pruneUnusedFiles(model)
                 report(ModelDownloadState.Ready(targetDir))
                 refreshReadyModels()
                 refreshAvailableStorage()
@@ -728,6 +668,7 @@ class ModelManager(private val context: Context) {
             if (tempArchiveFile.exists()) {
                 tempArchiveFile.delete()
             }
+            _activeDownloadId.value = null
         }
     }
 

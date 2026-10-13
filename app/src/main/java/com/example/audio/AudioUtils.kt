@@ -95,6 +95,22 @@ object AudioUtils {
     }
 
     /**
+     * Converts interleaved stereo (or mono) 16-bit PCM to mono floats in [-1, 1] at the original
+     * sample rate. Resampling is done separately by a [StreamingResampler] that keeps its state
+     * across buffers.
+     */
+    fun toMonoFloats(buffer: ShortArray, readShorts: Int, isStereo: Boolean): FloatArray {
+        val validRead = min(readShorts, buffer.size)
+        if (validRead <= 0) return FloatArray(0)
+        return if (isStereo) {
+            val frames = validRead / 2
+            FloatArray(frames) { i -> (buffer[i * 2] + buffer[i * 2 + 1]) / 65536.0f }
+        } else {
+            FloatArray(validRead) { i -> buffer[i] / 32768.0f }
+        }
+    }
+
+    /**
      * Calculates the Root Mean Square (RMS) in decibels (0 to 100 dB normalized scale)
      * from a float PCM buffer for live visualizer meters.
      */

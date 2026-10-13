@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -53,6 +55,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -63,10 +66,16 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -459,15 +468,16 @@ fun DraggableSubtitleBox(
                         }
 
                         if (displayOrig.isNotBlank()) {
-                            Text(
-                                text = displayOrig,
-                                fontSize = (settings.fontSizeSp - 3.5f).coerceAtLeast(11f).sp,
-                                color = theme.originalTextColor,
-                                fontStyle = FontStyle.Italic,
-                                style = TextStyle(shadow = dropShadow),
+                            TailText(
+                                text = AnnotatedString(displayOrig),
+                                visibleLines = 1,
                                 lineHeight = (settings.fontSizeSp * 1.15f).sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Clip,
+                                style = TextStyle(
+                                    fontSize = (settings.fontSizeSp - 3.5f).coerceAtLeast(11f).sp,
+                                    color = theme.originalTextColor,
+                                    fontStyle = FontStyle.Italic,
+                                    shadow = dropShadow
+                                ),
                                 modifier = Modifier.padding(bottom = 3.dp)
                             )
                         }
@@ -502,44 +512,36 @@ fun DraggableSubtitleBox(
                             modifier = Modifier.testTag("floating_translated_subtitle_text")
                         )
                     } else {
-                        // Display committed history on top, with active draft re-evaluating in-place on bottom line
-                        val linesToDisplay = mutableListOf<String>()
-                        if (activeDraftLine != null) {
-                            val historySlots = (lineCount - 1).coerceAtLeast(0)
-                            if (historySlots > 0) {
-                                linesToDisplay.addAll(committedFinalLines.takeLast(historySlots))
-                            }
-                            linesToDisplay.add(activeDraftLine!!)
+                        // Committed lines (muted) with the newest line (bold) at the bottom. Lines wrap,
+                        // and only the last lineCount lines are visible, so a long live sentence keeps
+                        // showing its newest words instead of being cut off after the first line.
+                        val lines = if (activeDraftLine != null) {
+                            committedFinalLines.takeLast(lineCount) + activeDraftLine!!
                         } else {
-                            linesToDisplay.addAll(committedFinalLines.takeLast(lineCount))
+                            committedFinalLines.takeLast(lineCount)
                         }
-
-                        val lastIndex = linesToDisplay.lastIndex
-
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            linesToDisplay.forEachIndexed { index, lineText ->
-                                val isBottomLine = (index == lastIndex)
-                                Text(
-                                    text = lineText,
-                                    fontSize = if (isBottomLine) settings.fontSizeSp.sp else (settings.fontSizeSp * 0.94f).sp,
-                                    fontWeight = if (isBottomLine) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (isBottomLine) theme.textColor else theme.textColor.copy(alpha = 0.75f),
-                                    style = TextStyle(shadow = dropShadow),
-                                    lineHeight = (settings.fontSizeSp * 1.30f).sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Clip,
-                                    modifier = if (isBottomLine) {
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .testTag("floating_translated_subtitle_text")
-                                    } else {
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .padding(bottom = 2.dp)
-                                    }
-                                )
+                        val subtitleText = buildAnnotatedString {
+                            lines.forEachIndexed { index, lineText ->
+                                if (index > 0) append("\n")
+                                val isNewest = index == lines.lastIndex
+                                withStyle(
+                                    SpanStyle(
+                                        fontSize = if (isNewest) settings.fontSizeSp.sp else (settings.fontSizeSp * 0.94f).sp,
+                                        fontWeight = if (isNewest) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isNewest) theme.textColor else theme.textColor.copy(alpha = 0.75f)
+                                    )
+                                ) {
+                                    append(lineText)
+                                }
                             }
                         }
+                        TailText(
+                            text = subtitleText,
+                            visibleLines = lineCount,
+                            lineHeight = (settings.fontSizeSp * 1.30f).sp,
+                            style = TextStyle(shadow = dropShadow),
+                            modifier = Modifier.testTag("floating_translated_subtitle_text")
+                        )
                     }
                 }
 
@@ -890,5 +892,42 @@ fun DraggableSubtitleBox(
                 }
             }
         }
+    }
+}
+
+/**
+ * Shows the end of [text]. The text wraps normally, but only its last [visibleLines] lines are
+ * visible; earlier lines are clipped off the top. Live captions therefore always show the newest
+ * words, however long the sentence gets.
+ */
+@Composable
+private fun TailText(
+    text: AnnotatedString,
+    visibleLines: Int,
+    lineHeight: TextUnit,
+    style: TextStyle,
+    modifier: Modifier = Modifier
+) {
+    val maxHeight = with(LocalDensity.current) { lineHeight.toDp() } * visibleLines
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = maxHeight)
+            .clipToBounds()
+    ) {
+        Text(
+            text = text,
+            style = style.copy(
+                lineHeight = lineHeight,
+                lineHeightStyle = LineHeightStyle(
+                    alignment = LineHeightStyle.Alignment.Center,
+                    trim = LineHeightStyle.Trim.None
+                )
+            ),
+            softWrap = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .wrapContentHeight(align = Alignment.Bottom, unbounded = true)
+        )
     }
 }
