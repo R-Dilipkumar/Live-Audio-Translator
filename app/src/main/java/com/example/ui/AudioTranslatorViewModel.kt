@@ -254,6 +254,9 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
             appSettings.collect { settings ->
                 speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
                 speechEngine.maxUtteranceWindow = settings.maxUtteranceWindow
+                speechEngine.noSpeechRestartDelay = settings.noSpeechRestartDelay
+                speechEngine.minSentenceLength = settings.minSentenceLength
+                speechEngine.singleCharacterMode = settings.singleCharacterMode
                 speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
                 translatorEngine.confidenceThreshold = settings.languageIdConfidence
 

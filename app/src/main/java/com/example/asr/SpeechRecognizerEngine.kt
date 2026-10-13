@@ -96,6 +96,19 @@ class SpeechRecognizerEngine(
     //   subtitle can stay open during continuous speech or music.
     @Volatile var silenceEndpointDelay: Float = DEFAULT_SILENCE_ENDPOINT_DELAY
     @Volatile var maxUtteranceWindow: Float = DEFAULT_MAX_UTTERANCE_WINDOW
+    // noSpeechRestartDelay -> rule1.minTrailingSilence: seconds with no recognized words before
+    //   a fresh stream starts. Shorter recovers faster after noise; longer avoids cutting slow starts.
+    @Volatile var noSpeechRestartDelay: Float = DEFAULT_NO_SPEECH_RESTART_DELAY
+    // minSentenceLength -> rule2.minUtteranceLength: a pause only ends a sentence once it is at
+    //   least this long, so short fragments are not cut off and translated on their own.
+    @Volatile var minSentenceLength: Float = DEFAULT_MIN_SENTENCE_LENGTH
+    // What to do with a finished line of a single character: join it to the start of the next
+    // sentence (SINGLE_CHAR_JOIN_NEXT), drop it, or keep it as its own line.
+    @Volatile var singleCharacterMode: Int = SINGLE_CHAR_JOIN_NEXT
+
+    // A one-character line waiting to be joined to the next sentence, and when it was heard
+    private var pendingFragment: String? = null
+    private var pendingFragmentTime = 0L
     @Volatile var isAntiFreezeWatchdogEnabled: Boolean = true
 
     // Anti-freeze watchdog: time of the last partial change, final, or stream reset.
@@ -107,18 +120,41 @@ class SpeechRecognizerEngine(
     // Consistent buffer size of 0.1s (1600 samples at 16kHz 16-bit mono) aligned to 2-byte boundaries
     companion object {
         const val CHUNK_SIZE_SAMPLES = 1600
-        const val DEFAULT_SILENCE_ENDPOINT_DELAY = 1.1f
+        const val DEFAULT_SILENCE_ENDPOINT_DELAY = 0.8f
         const val DEFAULT_MAX_UTTERANCE_WINDOW = 15.0f
+        const val DEFAULT_NO_SPEECH_RESTART_DELAY = 1.2f
+        const val DEFAULT_MIN_SENTENCE_LENGTH = 0.0f
+
+        const val SINGLE_CHAR_JOIN_NEXT = 0
+        const val SINGLE_CHAR_DROP = 1
+        const val SINGLE_CHAR_KEEP = 2
+        // A held character is only joined if the next sentence starts within this time
+        const val PENDING_FRAGMENT_MAX_AGE_MS = 4_000L
+
+        /** Joins two pieces of recognized text: no space between CJK/Thai text, a space otherwise. */
+        fun joinFragments(first: String, second: String): String {
+            if (first.isEmpty()) return second
+            if (second.isEmpty()) return first
+            val a = first.last()
+            val b = second.first()
+            val needsSpace = (a.isLetterOrDigit() && a.code < 0x2E80) && (b.isLetterOrDigit() && b.code < 0x2E80)
+            return if (needsSpace) "$first $second" else first + second
+        }
         // If audio keeps flowing but the recognizer produces no new text and no endpoint for
         // this long, the watchdog commits whatever is pending and resets the stream.
         const val ANTI_FREEZE_TIMEOUT_MS = 8_000L
 
-        fun buildEndpointConfig(silenceEndpointDelay: Float, maxUtteranceWindow: Float): EndpointConfig {
+        fun buildEndpointConfig(
+            silenceEndpointDelay: Float,
+            maxUtteranceWindow: Float,
+            noSpeechRestartDelay: Float = DEFAULT_NO_SPEECH_RESTART_DELAY,
+            minSentenceLength: Float = DEFAULT_MIN_SENTENCE_LENGTH
+        ): EndpointConfig {
             return EndpointConfig(
-                // rule1: 2.4 s of silence with nothing recognized resets the stream
-                rule1 = EndpointRule(mustContainNonSilence = false, minTrailingSilence = 2.4f, minUtteranceLength = 0.0f),
-                // rule2: after speech (utterances over 3 s), this much trailing silence ends the utterance
-                rule2 = EndpointRule(mustContainNonSilence = true, minTrailingSilence = silenceEndpointDelay.coerceIn(0.3f, 3.0f), minUtteranceLength = 3.0f),
+                // rule1: this long with nothing recognized starts a fresh stream
+                rule1 = EndpointRule(mustContainNonSilence = false, minTrailingSilence = noSpeechRestartDelay.coerceIn(0.5f, 5.0f), minUtteranceLength = 0.0f),
+                // rule2: after speech, this much trailing silence ends the utterance
+                rule2 = EndpointRule(mustContainNonSilence = true, minTrailingSilence = silenceEndpointDelay.coerceIn(0.3f, 3.0f), minUtteranceLength = minSentenceLength.coerceIn(0f, 10f)),
                 // rule3: force an endpoint once the utterance is this long, even without silence
                 rule3 = EndpointRule(mustContainNonSilence = false, minTrailingSilence = 0.0f, minUtteranceLength = maxUtteranceWindow.coerceIn(5.0f, 30.0f))
             )
@@ -128,7 +164,9 @@ class SpeechRecognizerEngine(
     private data class LoadedConfig(
         val modelId: String,
         val silenceEndpointDelay: Float,
-        val maxUtteranceWindow: Float
+        val maxUtteranceWindow: Float,
+        val noSpeechRestartDelay: Float,
+        val minSentenceLength: Float
     )
 
     // BUG 7 FIX: Use ArrayDeque instead of MutableList<Float>. The old subList(0, n).clear()
@@ -209,7 +247,7 @@ class SpeechRecognizerEngine(
                 return@withLock false
             }
 
-            val wanted = LoadedConfig(resolved.modelId, silenceEndpointDelay, maxUtteranceWindow)
+            val wanted = LoadedConfig(resolved.modelId, silenceEndpointDelay, maxUtteranceWindow, noSpeechRestartDelay, minSentenceLength)
             if (hasRecognizer && loadedConfig == wanted) {
                 if (_engineState.value !is RecognizerState.Listening) {
                     _engineState.value = RecognizerState.Ready
@@ -235,7 +273,7 @@ class SpeechRecognizerEngine(
                 val recognizerConfig = OnlineRecognizerConfig(
                     featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80),
                     modelConfig = modelConfig,
-                    endpointConfig = buildEndpointConfig(wanted.silenceEndpointDelay, wanted.maxUtteranceWindow),
+                    endpointConfig = buildEndpointConfig(wanted.silenceEndpointDelay, wanted.maxUtteranceWindow, wanted.noSpeechRestartDelay, wanted.minSentenceLength),
                     enableEndpoint = true,
                     decodingMethod = "greedy_search"
                 )
@@ -260,7 +298,8 @@ class SpeechRecognizerEngine(
                 }
                 _engineState.value = RecognizerState.Ready
                 Log.i(TAG, "Sherpa-ONNX recognizer ready: model=${resolved.modelId} type='${resolved.modelType}' " +
-                        "silence=${wanted.silenceEndpointDelay}s maxUtterance=${wanted.maxUtteranceWindow}s")
+                        "silence=${wanted.silenceEndpointDelay}s maxUtterance=${wanted.maxUtteranceWindow}s " +
+                        "restartAfterNoWords=${wanted.noSpeechRestartDelay}s minSentence=${wanted.minSentenceLength}s")
                 true
             } catch (t: Throwable) {
                 val error = "Failed to initialize ASR engine: ${t.localizedMessage}"
@@ -355,9 +394,10 @@ class SpeechRecognizerEngine(
 
         synchronized(recognizerLock) {
             val recognizer = onlineRecognizer
-            val stream = onlineStream
+            val initialStream = onlineStream
 
-            if (recognizer != null && stream != null) {
+            if (recognizer != null && initialStream != null) {
+                var stream: OnlineStream = initialStream
                 try {
                     _engineState.value = RecognizerState.Listening
 
@@ -393,21 +433,20 @@ class SpeechRecognizerEngine(
 
                         if (recognizer.isEndpoint(stream)) {
                             val epochId = currentUtteranceId
-                            if (sanitizedDraft.isNotBlank()) {
-                                Log.d(TAG, "Speech endpoint reached (utteranceId=$epochId). Emitting Final: $sanitizedDraft")
-                                emitFinalUtterance(sanitizedDraft, epochId)
-                            }
-                            finishUtterance(recognizer, stream, now)
+                            handleFinishedText(sanitizedDraft, epochId, now)
+                            stream = finishUtterance(recognizer, stream, now)
                         } else if (isAntiFreezeWatchdogEnabled && now - lastOutputOrResetTime >= ANTI_FREEZE_TIMEOUT_MS) {
                             Log.w(TAG, "Anti-freeze watchdog: no recognizer output for ${now - lastOutputOrResetTime} ms while audio flows; resetting stream")
-                            if (sanitizedDraft.isNotBlank()) {
-                                emitFinalUtterance(sanitizedDraft, currentUtteranceId)
+                            handleFinishedText(sanitizedDraft, currentUtteranceId, now)
+                            stream = finishUtterance(recognizer, stream, now)
+                        } else if (sanitizedDraft.isNotBlank()) {
+                            // Show a held one-character piece in front of the new sentence
+                            val shown = withPendingFragment(sanitizedDraft, now, consume = false)
+                            if (shown != _partialTextFlow.value) {
+                                lastOutputOrResetTime = now
+                                _partialTextFlow.value = shown
+                                emitPartialUtterance(shown, currentUtteranceId)
                             }
-                            finishUtterance(recognizer, stream, now)
-                        } else if (sanitizedDraft.isNotBlank() && sanitizedDraft != _partialTextFlow.value) {
-                            lastOutputOrResetTime = now
-                            _partialTextFlow.value = sanitizedDraft
-                            emitPartialUtterance(sanitizedDraft, currentUtteranceId)
                         }
                     }
                 } catch (t: Throwable) {
@@ -427,14 +466,61 @@ class SpeechRecognizerEngine(
         }
     }
 
-    /** Must hold [recognizerLock]. Clears the partial, resets the stream and starts a new utterance. */
-    private fun finishUtterance(recognizer: OnlineRecognizer, stream: OnlineStream, now: Long) {
+    /**
+     * Must hold [recognizerLock]. Clears the partial and starts the next utterance on a fresh stream.
+     *
+     * A fresh stream is used instead of recognizer.reset(stream): with the multilingual model,
+     * reset streams often stopped producing any text after a few sentences (checked offline on a
+     * recording from a device: reset gave 3 phrases in 33 s, fresh streams gave 7).
+     */
+    private fun finishUtterance(recognizer: OnlineRecognizer, stream: OnlineStream, now: Long): OnlineStream {
         _partialTextFlow.value = ""
-        // Synchronously reset recognizer stream to be immediately ready for subsequent incoming audio frames
-        recognizer.reset(stream)
+        val next = recognizer.createStream()
+        onlineStream = next
+        try {
+            stream.release()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed releasing finished stream: ${t.message}")
+        }
         lastOutputOrResetTime = now
         // Advance to next utterance epoch for subsequent speech
         currentUtteranceId = utteranceEpochCounter.incrementAndGet()
+        return next
+    }
+
+    /**
+     * Must hold [recognizerLock]. Emits a finished sentence. A one-character result is held and
+     * joined to the start of the next sentence (default), dropped, or kept, per [singleCharacterMode].
+     * Splitting a sentence after its first character would otherwise change its meaning.
+     */
+    private fun handleFinishedText(text: String, utteranceId: Long, now: Long) {
+        if (text.isBlank()) return
+        val isSingleCharacter = text.codePointCount(0, text.length) == 1
+        if (isSingleCharacter && singleCharacterMode == SINGLE_CHAR_JOIN_NEXT) {
+            val held = withPendingFragment(text, now, consume = true)
+            pendingFragment = held
+            pendingFragmentTime = now
+            Log.d(TAG, "Holding one-character result to join with the next sentence: $held")
+            return
+        }
+        if (isSingleCharacter && singleCharacterMode == SINGLE_CHAR_DROP) {
+            Log.d(TAG, "Dropped one-character result: $text")
+            return
+        }
+        val full = withPendingFragment(text, now, consume = true)
+        Log.d(TAG, "Speech endpoint reached (utteranceId=$utteranceId). Emitting Final: $full")
+        emitFinalUtterance(full, utteranceId)
+    }
+
+    /** Puts a recent held fragment in front of [text]. With [consume], the fragment is used up. */
+    private fun withPendingFragment(text: String, now: Long, consume: Boolean): String {
+        val fragment = pendingFragment ?: return text
+        if (now - pendingFragmentTime > PENDING_FRAGMENT_MAX_AGE_MS) {
+            pendingFragment = null
+            return text
+        }
+        if (consume) pendingFragment = null
+        return joinFragments(fragment, text)
     }
 
     private fun emitPartialUtterance(draft: String, utteranceId: Long) {
@@ -472,14 +558,15 @@ class SpeechRecognizerEngine(
             val current = _partialTextFlow.value.trim()
             if (current.isNotEmpty()) {
                 val epochId = currentUtteranceId
-                emitFinalUtterance(current, epochId)
+                handleFinishedText(current, epochId, System.currentTimeMillis())
                 _partialTextFlow.value = ""
                 if (recognizer != null && stream != null) {
                     try {
-                        recognizer.reset(stream)
+                        finishUtterance(recognizer, stream, System.currentTimeMillis())
                     } catch (_: Exception) {}
+                } else {
+                    currentUtteranceId = utteranceEpochCounter.incrementAndGet()
                 }
-                currentUtteranceId = utteranceEpochCounter.incrementAndGet()
             }
         }
         synchronized(pcmChunkAccumulator) {

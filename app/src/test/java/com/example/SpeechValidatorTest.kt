@@ -52,3 +52,22 @@ class SpeechValidatorTest {
         assertFalse(SpeechValidator.isGenuineSpeech("  \n "))
     }
 }
+
+class FragmentJoinTest {
+    private fun join(a: String, b: String) = com.example.asr.SpeechRecognizerEngine.joinFragments(a, b)
+
+    @org.junit.Test
+    fun japaneseFragmentsJoinWithoutSpace() {
+        org.junit.Assert.assertEquals("駅はどこですか", join("駅", "はどこですか"))
+    }
+
+    @org.junit.Test
+    fun latinWordsJoinWithSpace() {
+        org.junit.Assert.assertEquals("I think so", join("I", "think so"))
+    }
+
+    @org.junit.Test
+    fun mixedScriptsJoinWithoutSpace() {
+        org.junit.Assert.assertEquals("好Hello", join("好", "Hello"))
+    }
+}
