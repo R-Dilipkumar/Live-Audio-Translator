@@ -17,5 +17,3 @@ local.properties
 .env
 debug.keystore
 
-# Local Claude Code instructions
-CLAUDE.md

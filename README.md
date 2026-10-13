@@ -1,186 +1,111 @@
-# Live Audio Translator 🎧🌐
+# LiveSub — Live Audio Translator
 
-[![Android 10+](https://img.shields.io/badge/Android-10%2B%20(API%2029%2B)-brightgreen.svg)](https://developer.android.com)
-[![Target SDK 35](https://img.shields.io/badge/Target%20SDK-35%20(Android%2015)-blue.svg)](https://developer.android.com)
-[![Sherpa-ONNX](https://img.shields.io/badge/ASR-Sherpa--ONNX%20Zipformer-orange.svg)](https://github.com/k2-fsa/sherpa-onnx)
-[![ML Kit](https://img.shields.io/badge/Translate-Google%20ML%20Kit-blue.svg)](https://developers.google.com/ml-kit)
-[![Jetpack Compose](https://img.shields.io/badge/UI-Jetpack%20Compose%20%2F%20Material%203-4285F4.svg)](https://developer.android.com/jetpack/compose)
-[![100% Offline](https://img.shields.io/badge/Privacy-100%25%20On--Device-success.svg)](#privacy--offline-first)
+Live subtitles for anything playing on your Android phone. LiveSub listens to a video, stream, game or call, turns the speech into text, translates it, and shows the translation in a floating subtitle box on top of the app you are using.
 
-**Live Audio Translator** is a privacy-first, on-device Android application that captures internal system audio or microphone input in real time, generates streaming speech-to-text transcripts using **Sherpa-ONNX Zipformer**, and translates dialogue using **Google ML Kit Translate**—displaying synchronous floating subtitles directly on top of videos, live streams, games, and voice calls.
+Speech recognition and translation run on the phone. Audio and text are not sent to a server.
 
----
+[![Android 10+](https://img.shields.io/badge/Android-10%2B-brightgreen.svg)](https://developer.android.com)
+[![Speech: Sherpa-ONNX](https://img.shields.io/badge/Speech-Sherpa--ONNX-orange.svg)](https://github.com/k2-fsa/sherpa-onnx)
+[![Translation: ML Kit](https://img.shields.io/badge/Translation-Google%20ML%20Kit-blue.svg)](https://developers.google.com/ml-kit/language/translation)
 
-## 🌟 Key Features
+## Download
 
-- **Direct Internal Audio Capture**: Uses Android's `AudioPlaybackCaptureConfiguration` (MediaProjection API) to capture internal game, video, and app audio with zero ambient background noise (Android 10+).
-- **Dual Capture Modes**: Instantly toggle between internal media audio and microphone capture.
-- **Ultra-Low Latency Streaming ASR**:
-  - Powered by offline Sherpa-ONNX Zipformer models.
-  - **Fast Tier**: ~85–100ms response time, optimized for fast-paced action and gaming.
-  - **Cinematic Tier**: High accuracy tuned for complex dialogue, accents, and film grammar.
-  - Supported models: Japanese, English, Spanish, Chinese, Korean, and Bilingual Chinese/English.
-- **Completely On-Device Translation**:
-  - Offline neural translation powered by Google ML Kit.
-  - Automatic language identification with confidence scoring.
-  - Bidirectional language swapping and clause boundary punctuation segmentation.
-- **Audio DSP & Voice Isolation**:
-  - Cascaded 2nd-order Butterworth IIR Biquad bandpass filter (150 Hz high-pass to 3500 Hz low-pass) to strip background music (BGM), mechanical hum, and sound effects.
-  - RMS energy noise gate to suppress false triggers during music or ambient pauses.
-- **Interactive Floating Subtitle Overlay**:
-  - System alert window (`SYSTEM_ALERT_WINDOW`) hosting Jetpack Compose inside a background service.
-  - Draggable, resizable, collapsible, with support for landscape and portrait auto-clamping.
-  - Customizable visual themes: *Anime Amber*, *Cinema Dark*, *Manga Clean*, and *High Contrast Yellow*.
-  - Configurable font sizes, opacity, max lines (1–3 with auto-rolloff), and subtitle linger timers.
-- **Quick Settings Tile**: Start and stop real-time translation directly from Android's Quick Settings shade without opening the main app.
-- **DRM & Silence Detection**: Monitors continuous absolute silence to warn users when apps block internal audio capture via `FLAG_SECURE` or DRM protections.
-- **Transcript History**: Room Database persistence with search, filtering, and export capabilities.
+Get the latest APK from [Releases](https://github.com/R-Dilipkumar/Live-Audio-Translator/releases). Open it on your phone and allow installing from that source.
 
----
+Test builds are signed with a debug key, so Android may warn that the developer is unknown.
 
-## 📐 Architecture Overview
+## How to use
+
+1. **Download a speech model.** Open **Manage Models** and download the model for the language you will listen to. For Japanese, use **Multilingual**.
+2. **Download translation packs.** In the same tab, download the pack for the spoken language and the pack for the language you read.
+3. **Pick languages.** On the **Translate** tab, choose the spoken language (or Auto-Detect) and the language to translate to.
+4. **Start.** Choose **Internal** (audio from other apps) or **Mic**, press **Start**, and allow screen/audio capture when Android asks.
+5. **Open the overlay.** Press **Launch Overlay** to show subtitles on top of other apps. Drag it anywhere; use the gear icon for size, lines and theme.
+
+Some apps block audio capture (DRM-protected video, for example); LiveSub then receives only silence.
+
+## Features
+
+- **Captures app audio or the microphone.** Internal capture uses Android's audio playback capture (Android 10+).
+- **Live speech recognition** with streaming Zipformer models from Sherpa-ONNX. Words appear while they are spoken.
+- **On-device translation** with Google ML Kit, including automatic detection of the spoken language.
+- **Floating subtitles** over any app: draggable, 1–3 lines, adjustable text size, background and themes. The newest words always stay visible.
+- **Live feed and history** in the app, saved on the phone. Tap a line to copy it.
+- **Quick Settings tile** to start and stop without opening the app.
+- **Audio clean-up tuned for speech**: rumble filter, a boost for quiet or husky voices, and an optional noise gate.
+- **Simple settings** for subtitles, plus **Developer settings** for recognition tuning (pause length, restart timing, shortest sentence, handling of one-character results) and a recorder that saves exactly what the speech engine hears.
+
+## Speech models
+
+One streaming model per language, downloaded from the official [Sherpa-ONNX model release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models). Sizes are download sizes.
+
+| Model | Languages | Download | Notes |
+|---|---|---|---|
+| Multilingual | Japanese, Chinese, English, Russian, Arabic, Thai, Vietnamese, Indonesian | 247 MB | Switches language automatically |
+| English | English | 55 MB | Kroko, punctuation and capitals |
+| Chinese | Chinese with English | 128 MB | X-ASR, punctuation |
+| Spanish | Spanish | 119 MB | Kroko, punctuation and capitals |
+| French | French | 55 MB | Kroko, punctuation and capitals |
+| German | German | 55 MB | Kroko, punctuation and capitals |
+| Korean | Korean | 399 MB | |
+| Russian | Russian | 86 MB | Vosk |
+| Bengali | Bengali | 83 MB | Vosk |
+
+Kroko models are community models under CC-BY-SA. Other models use their authors' licenses.
+
+Translation packs are Google ML Kit models, about 30 MB each.
+
+## How it works
 
 ```mermaid
-flowchart TD
-    subgraph AudioCapture["1. Audio Capture Layer"]
-        Internal["Internal Audio (AudioPlaybackCapture)"] --> AudioRec["AudioRecord (16-bit PCM)"]
-        Mic["Microphone Input"] --> AudioRec
-    end
-
-    subgraph DSP["2. Audio Pre-Processing & DSP"]
-        AudioRec --> Resample["Stereo-to-Mono & 16kHz Resampling"]
-        Resample --> Bandpass["IIR Biquad Filter (150Hz - 3.5kHz)"]
-        Bandpass --> NoiseGate["RMS Noise Gate (BGM Suppression)"]
-    end
-
-    subgraph ASR["3. Streaming Speech Recognition"]
-        NoiseGate --> Sherpa["Sherpa-ONNX Streaming Recognizer\n(Zipformer INT8 / FP32 ONNX)"]
-        Sherpa --> FIFO["Chronological Sentence Chunking\n(Punctuation Boundaries)"]
-    end
-
-    subgraph Translation["4. Neural Machine Translation"]
-        FIFO --> LangID["ML Kit Language Identification"]
-        LangID --> MLKit["ML Kit On-Device Translation"]
-    end
-
-    subgraph Output["5. Subtitle Presentation & Storage"]
-        MLKit --> Overlay["Floating Subtitle Service\n(Draggable Compose Window)"]
-        MLKit --> MainUI["Main Activity (Live Waveform & Text)"]
-        MLKit --> RoomDB["Room Database (Transcript History)"]
-    end
+flowchart LR
+    A[App audio or mic] --> B[16 kHz resampling<br/>and clean-up]
+    B --> C[Sherpa-ONNX<br/>streaming recognizer]
+    C --> D[Ordered translation queue<br/>ML Kit]
+    D --> E[Floating subtitles]
+    D --> F[Live feed and history]
 ```
 
----
+- **Capture** (`service/AudioCaptureService.kt`): a foreground service reads audio, converts it to 16 kHz mono with an anti-aliasing resampler, and applies the optional filter, boost and gate.
+- **Recognition** (`asr/SpeechRecognizerEngine.kt`): feeds audio to Sherpa-ONNX and emits draft and finished sentences in order. Each sentence starts on a fresh stream. `asr/ModelManager.kt` downloads, installs and selects models; each model lives in its own folder.
+- **Translation** (`translate/`): one ordered queue with a time limit, ML Kit language detection for Auto-Detect, and clear messages when a language pack is missing.
+- **Display** (`overlay/`, `ui/`): the overlay service and the app read the same results; older or out-of-order results are ignored.
 
-## 🛠️ Tech Stack & Dependencies
+## Building
 
-| Layer | Technologies |
-| :--- | :--- |
-| **Language & Tooling** | Kotlin 2.0+, Kotlin Coroutines & Flow, KSP |
-| **UI Framework** | Jetpack Compose (BOM), Material 3, Custom ViewTree Lifecycle |
-| **Speech-to-Text (ASR)** | [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) (Zipformer Streaming ONNX models) |
-| **Machine Translation** | [Google ML Kit Translate](https://developers.google.com/ml-kit/language/translation) & Language ID |
-| **Audio Processing** | Android AudioRecord, AudioPlaybackCapture, Custom Biquad DSP |
-| **Local Storage** | Room Database, DataStore Preferences |
-| **Network & Archives** | OkHttp 4, Apache Commons Compress (BZip2 / Tar / Zip) |
-| **Testing** | JUnit 4, Robolectric, Kotlinx Coroutines Test, Compose UI Test |
-
----
-
-## 📋 System Requirements & Permissions
-
-- **Minimum SDK**: Android 10 (API 29) — Required for internal audio playback capture.
-- **Target SDK**: Android 15 (API 35).
-- **Compile SDK**: Android 16 (API 36.1).
-- **NDK ABIs**: `arm64-v8a`, `armeabi-v7a`, `x86_64`.
-
-### Required Android Permissions
-
-- `android.permission.RECORD_AUDIO`: Capturing internal audio streams and microphone input.
-- `android.permission.SYSTEM_ALERT_WINDOW`: Displaying the draggable floating subtitle window over other applications.
-- `android.permission.FOREGROUND_SERVICE`: Running audio capture and subtitle services continuously in the background.
-- `android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION`: Android 14+ requirement for screen/audio capture services.
-- `android.permission.FOREGROUND_SERVICE_MICROPHONE`: Android 14+ requirement for microphone capture services.
-- `android.permission.POST_NOTIFICATIONS`: Showing active foreground capture notifications and download progress.
-- `android.permission.INTERNET`: One-time downloading of offline Sherpa-ONNX models and ML Kit language packs.
-
----
-
-## 🚀 Getting Started & Building
-
-### Prerequisites
-
-1. **Android Studio**: Android Studio Koala / Ladybug or newer.
-2. **JDK**: Java Development Kit 17 or 21.
-3. **Android SDK**: API Level 35 SDK and Build-Tools installed.
-4. **NDK**: NDK 26+ installed via Android SDK Manager.
-
-### Clone and Open Project
+Requirements: JDK 17+, Android SDK (platform 36.1, build-tools 36.1.0) and the NDK. Android Studio is optional.
 
 ```bash
-git clone https://github.com/<your-username>/Live-Audio-Translator.git
+git clone https://github.com/R-Dilipkumar/Live-Audio-Translator.git
 cd Live-Audio-Translator
 ```
 
-Open the project directory in Android Studio. Gradle will sync dependencies automatically.
-
-### Build via Command Line
+Create `local.properties` with `sdk.dir=<path to your Android SDK>`. Debug builds are signed with `debug.keystore` in the project root (not in the repository), so create one first, for example with `keytool -genkeypair -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -validity 10000 -dname "CN=Android Debug"`.
 
 ```bash
-# Debug APK
-./gradlew assembleDebug
-
-# Release APK (minified with ProGuard/R8)
-./gradlew assembleRelease
-
-# Run unit tests
-./gradlew test
+./gradlew assembleDebug              # app/build/outputs/apk/debug/app-debug.apk
+./gradlew :app:testDebugUnitTest     # unit tests
 ```
 
----
+Release builds read `KEYSTORE_PATH`, `STORE_PASSWORD` and `KEY_PASSWORD` from environment variables.
 
-## 📦 Model Management & Offline Operation
+## Permissions
 
-### 1. Sherpa-ONNX Speech Models
-The app downloads lightweight streaming Zipformer models directly from the official k2-fsa releases into the app's internal sandbox storage (`/data/user/0/.../files/models/`):
+| Permission | Why |
+|---|---|
+| Record audio | Capture app audio or the microphone |
+| Display over other apps | Show the floating subtitles |
+| Foreground service (media projection, microphone) | Keep capturing while you use other apps |
+| Notifications | Show the capture notification and errors |
+| Internet | Download speech models and translation packs |
 
-- **Japanese**:
-  - Fast: `sherpa-onnx-streaming-zipformer-ja-reazonspeech-2024-06-24` (~38 MB)
-  - Cinematic: `sherpa-onnx-streaming-zipformer-ja-large-2024-06-24` (~88 MB)
-- **English**:
-  - Fast: `sherpa-onnx-streaming-zipformer-en-20M-2023-02-17` (~42 MB)
-  - Cinematic: `sherpa-onnx-streaming-zipformer-en-large-2023-06-26` (~92 MB)
-- **Spanish**: Kroko 2025 Fast & Large models (~36 MB – ~82 MB)
-- **Chinese / Bilingual**: 14M Fast & Bilingual ZH-EN models (~32 MB – ~115 MB)
-- **Korean**: Korean 2024 Fast model (~39 MB)
+## Privacy
 
-*All archives are validated, storage space is pre-checked (StatFs ≥ 150 MB), and extraction is secured against Zip Slip path traversal.*
+- Audio, transcripts and translations are processed on the phone and are not uploaded.
+- The internet is used to download models and language packs.
+- Google ML Kit may send anonymous usage statistics to Google, as described in its terms.
+- History is stored on the phone until you clear it.
 
-### 2. Google ML Kit Language Packs
-Translations are performed entirely offline using Google ML Kit's on-device models. Language packs (~30 MB each) can be downloaded on-demand from within the app settings.
+## Contributing
 
----
-
-## 🔒 Privacy & Offline-First Design
-
-- **100% On-Device Processing**: Neither captured audio, transcribed text, nor translated subtitles are sent to remote servers.
-- **No Cloud Inference Cost**: Translation and ASR run locally on device CPU/NPU using quantized INT8 ONNX models and TensorFlow Lite.
-- **Local Persistence**: Transcript history remains stored in local Room SQLite storage until manually cleared by the user.
-
----
-
-## 🤝 Contributing
-
-Contributions, bug reports, and pull requests are welcome!
-1. Fork the project.
-2. Create your feature branch (`git checkout -b feature/MyFeature`).
-3. Commit your changes (`git commit -m "Add MyFeature"`).
-4. Push to the branch (`git push origin feature/MyFeature`).
-5. Open a Pull Request.
-
----
-
-## 📄 License
-
-This project is open-source and available under the [Apache License 2.0](LICENSE).
-ASR models are distributed under their respective licenses from [k2-fsa / Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx).
+Bug reports and pull requests are welcome. Please run `./gradlew :app:testDebugUnitTest` before opening a pull request.
