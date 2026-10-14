@@ -52,18 +52,6 @@ data class TranslationResult(
     val status: TranslationStatus = TranslationStatus.TRANSLATED
 )
 
-sealed class TranslationPackStatus {
-    object Checking : TranslationPackStatus()
-    object Ready : TranslationPackStatus()
-    data class NeedsDownload(
-        val sourceMissing: Boolean,
-        val targetMissing: Boolean,
-        val englishPivotMissing: Boolean = false
-    ) : TranslationPackStatus()
-    data class Downloading(val progressPercent: Int) : TranslationPackStatus()
-    data class Error(val message: String) : TranslationPackStatus()
-}
-
 class LocalTranslatorEngine(private val context: Context) {
 
     companion object {
@@ -110,9 +98,6 @@ class LocalTranslatorEngine(private val context: Context) {
     private val _targetLanguage = MutableStateFlow(targetAvailableLanguages.first { it.code == TranslateLanguage.ENGLISH })
     val targetLanguage: StateFlow<SupportedLanguage> = _targetLanguage.asStateFlow()
 
-    private val _packStatus = MutableStateFlow<TranslationPackStatus>(TranslationPackStatus.Checking)
-    val packStatus: StateFlow<TranslationPackStatus> = _packStatus.asStateFlow()
-
     // Lightweight state flag indicating if any required language model is currently missing on disk
     private val _isModelMissing = MutableStateFlow(false)
     val isModelMissing: StateFlow<Boolean> = _isModelMissing.asStateFlow()
@@ -132,9 +117,6 @@ class LocalTranslatorEngine(private val context: Context) {
     private val _translationFlow = MutableSharedFlow<TranslationResult>(extraBufferCapacity = 64)
     val translationFlow: SharedFlow<TranslationResult> = _translationFlow.asSharedFlow()
 
-    // Rolling buffer of recent completed sentence translations (retains up to 20 sentences)
-    private val _recentTranslations = MutableStateFlow<List<TranslationResult>>(emptyList())
-    val recentTranslations: StateFlow<List<TranslationResult>> = _recentTranslations.asStateFlow()
 
     // Latest translation result as a StateFlow for immediate state sync
     private val _latestTranslation = MutableStateFlow<TranslationResult?>(null)
@@ -160,8 +142,6 @@ class LocalTranslatorEngine(private val context: Context) {
             return false
         }
     }
-
-    private val activeDownloadKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     // True once _downloadedLanguages has been read from ML Kit at least once.
     @Volatile private var downloadedLanguagesLoaded = false
@@ -268,36 +248,10 @@ class LocalTranslatorEngine(private val context: Context) {
     }
 
     /**
-     * Pre-flight model cache validation via RemoteModelManager:
-     * Verifies that the source, target, and (if pivoting) English models are all confirmed downloaded on disk.
-     */
-    suspend fun areRequiredModelsDownloaded(srcCode: String, tgtCode: String): Boolean = withContext(Dispatchers.IO) {
-        val needed = getRequiredLanguageCodes(srcCode, tgtCode)
-        for (code in needed) {
-            if (!isModelDownloadedOnDisk(code)) {
-                return@withContext false
-            }
-        }
-        true
-    }
-
-    /**
-     * Checks if the required language pack models are present locally on disk via RemoteModelManager.
-     */
-    suspend fun checkModelPresence(): Pair<Boolean, Boolean> = withContext(Dispatchers.IO) {
-        refreshDownloadedLanguages()
-        val srcIsAuto = _sourceLanguage.value.isAutoDetect
-        val srcDownloaded = if (srcIsAuto) true else isModelDownloadedOnDisk(_sourceLanguage.value.code)
-        val tgtDownloaded = isModelDownloadedOnDisk(_targetLanguage.value.code)
-
-        Pair(srcDownloaded, tgtDownloaded)
-    }
-
-    /**
-     * Pre-flight check and client setup when switching active source/target language pairs.
+     * Checks whether the packs for the chosen languages are downloaded and updates [isModelMissing].
+     * The translator itself is created on first use (getOrCreateTranslator).
      */
     suspend fun checkAndPrepareTranslator() = withContext(Dispatchers.IO) {
-        _packStatus.value = TranslationPackStatus.Checking
         try {
             val srcLang = _sourceLanguage.value
             val tgtLang = _targetLanguage.value
@@ -309,40 +263,18 @@ class LocalTranslatorEngine(private val context: Context) {
                 val needsPivot = tgtLang.code != TranslateLanguage.ENGLISH
                 val englishDownloaded = if (needsPivot) isModelDownloadedOnDisk(TranslateLanguage.ENGLISH) else true
 
-                if (tgtDownloaded && englishDownloaded) {
-                    _packStatus.value = TranslationPackStatus.Ready
-                    _isModelMissing.value = false
-                } else {
-                    _packStatus.value = TranslationPackStatus.NeedsDownload(
-                        sourceMissing = false,
-                        targetMissing = !tgtDownloaded,
-                        englishPivotMissing = !englishDownloaded
-                    )
-                    _isModelMissing.value = true
-                }
+                _isModelMissing.value = !(tgtDownloaded && englishDownloaded)
             } else {
                 val srcDownloaded = isModelDownloadedOnDisk(srcLang.code)
                 val tgtDownloaded = isModelDownloadedOnDisk(tgtLang.code)
                 val needsPivot = srcLang.code != TranslateLanguage.ENGLISH && tgtLang.code != TranslateLanguage.ENGLISH
                 val englishDownloaded = if (needsPivot) isModelDownloadedOnDisk(TranslateLanguage.ENGLISH) else true
 
-                if (srcDownloaded && tgtDownloaded && englishDownloaded) {
-                    // The translator itself is created on first use (getOrCreateTranslator)
-                    _packStatus.value = TranslationPackStatus.Ready
-                    _isModelMissing.value = false
-                } else {
-                    _packStatus.value = TranslationPackStatus.NeedsDownload(
-                        sourceMissing = !srcDownloaded,
-                        targetMissing = !tgtDownloaded,
-                        englishPivotMissing = !englishDownloaded
-                    )
-                    _isModelMissing.value = true
-                }
+                _isModelMissing.value = !(srcDownloaded && tgtDownloaded && englishDownloaded)
             }
         } catch (e: Exception) {
             val error = "Language model check error: ${e.localizedMessage}"
             Log.e(TAG, error, e)
-            _packStatus.value = TranslationPackStatus.Error(error)
             NotificationHelper.showErrorNotification(context, "Translation Engine Error", error)
         }
     }
@@ -397,28 +329,6 @@ class LocalTranslatorEngine(private val context: Context) {
     }
 
     /**
-     * Downloads missing models for the current active source & target language pair upon explicit user action.
-     */
-    suspend fun downloadRequiredModels(maxRetries: Int = 3): Boolean = withContext(Dispatchers.IO) {
-        _packStatus.value = TranslationPackStatus.Downloading(10)
-
-        val src = _sourceLanguage.value
-        val tgt = _targetLanguage.value
-
-        var success = true
-        val neededCodes = getRequiredLanguageCodes(if (src.isAutoDetect) TranslateLanguage.ENGLISH else src.code, tgt.code)
-        for (code in neededCodes) {
-            val codeSuccess = downloadSingleLanguagePack(code, maxRetries)
-            if (!codeSuccess) success = false
-        }
-
-        if (success) {
-            checkAndPrepareTranslator()
-        }
-        success
-    }
-
-    /**
      * Deletes a language model to free space.
      */
     suspend fun deleteLanguageModel(langCode: String): Boolean = withContext(Dispatchers.IO) {
@@ -444,47 +354,6 @@ class LocalTranslatorEngine(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Error deleting model $langCode", e)
             false
-        }
-    }
-
-    /**
-     * Downloads the translation model pair for explicit user action, typically from the model management screen.
-     */
-    suspend fun downloadModelPairExplicitly(srcCode: String, tgtCode: String, conditions: DownloadConditions = DownloadConditions.Builder().build()): Boolean = withContext(Dispatchers.IO) {
-        val key = "${srcCode}_$tgtCode"
-        if (activeDownloadKeys.contains(key)) return@withContext false
-        activeDownloadKeys.add(key)
-
-        try {
-            Log.i(TAG, "Explicit user download initiated for model pair: $key")
-            _downloadingPacks.update { it + (srcCode to 20) + (tgtCode to 20) }
-
-            val options = TranslatorOptions.Builder()
-                .setSourceLanguage(srcCode)
-                .setTargetLanguage(tgtCode)
-                .build()
-            val translator = Translation.getClient(options)
-            translator.downloadModelIfNeeded(conditions).await()
-
-            synchronized(cacheLock) {
-                // Replacing a cached translator: close the old one, nothing else holds it
-                translatorCache.put(key, translator)?.let { old ->
-                    if (old !== translator) runCatching { old.close() }
-                }
-            }
-            if (_sourceLanguage.value.code == srcCode && _targetLanguage.value.code == tgtCode) {
-                _packStatus.value = TranslationPackStatus.Ready
-                _isModelMissing.value = false
-            }
-            refreshDownloadedLanguages()
-            Log.i(TAG, "Explicit ML Kit model download completed for: $key")
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "Explicit model download failed for $key: ${e.message}")
-            false
-        } finally {
-            activeDownloadKeys.remove(key)
-            _downloadingPacks.update { it - srcCode - tgtCode }
         }
     }
 
@@ -741,42 +610,9 @@ class LocalTranslatorEngine(private val context: Context) {
     // Called only by the translation queue's single consumer, so results are emitted in order.
     private suspend fun emitTranslation(result: TranslationResult) {
         synchronized(translationLock) {
-            if (result.isFinal && result.status.isTranslation) {
-                val currentList = _recentTranslations.value.toMutableList()
-                currentList.add(result)
-                if (currentList.size > 20) {
-                    currentList.removeAt(0)
-                }
-                _recentTranslations.value = currentList
-            }
             _latestTranslation.value = result
         }
         _translationFlow.emit(result)
-    }
-
-    /**
-     * Returns a rolling concatenated string of the most recent translated sentences
-     * limited to [maxLines] (1, 2, or 3 lines).
-     */
-    fun getRollingTranslatedText(maxLines: Int): String {
-        val list = _recentTranslations.value
-        if (list.isEmpty()) return ""
-        return list.takeLast(maxLines.coerceIn(1, 3)).joinToString("\n") { it.translatedText }
-    }
-
-    /**
-     * Returns a rolling concatenated string of the most recent original sentences
-     * limited to [maxLines] (1, 2, or 3 lines).
-     */
-    fun getRollingOriginalText(maxLines: Int): String {
-        val list = _recentTranslations.value
-        if (list.isEmpty()) return ""
-        return list.takeLast(maxLines.coerceIn(1, 3)).joinToString("\n") { it.originalText }
-    }
-
-    fun clearRecentTranslations() {
-        _recentTranslations.value = emptyList()
-        _latestTranslation.value = null
     }
 
     fun release() {

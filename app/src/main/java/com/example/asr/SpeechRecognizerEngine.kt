@@ -60,10 +60,6 @@ class SpeechRecognizerEngine(
     private val _utteranceFlow = MutableSharedFlow<AsrUtteranceEvent>(extraBufferCapacity = 64)
     val utteranceFlow: SharedFlow<AsrUtteranceEvent> = _utteranceFlow.asSharedFlow()
 
-    // Emits completed or segmented recognized text strings (Final commits)
-    private val _recognizedTextFlow = MutableSharedFlow<String>(extraBufferCapacity = 64)
-    val recognizedTextFlow: SharedFlow<String> = _recognizedTextFlow.asSharedFlow()
-
     // Emits live partial recognized text
     private val _partialTextFlow = MutableStateFlow("")
     val partialTextFlow: StateFlow<String> = _partialTextFlow.asStateFlow()
@@ -231,15 +227,9 @@ class SpeechRecognizerEngine(
         scope.launch {
             for (event in utteranceEvents) {
                 _utteranceFlow.emit(event)
-                if (event is AsrUtteranceEvent.Final) {
-                    _recognizedTextFlow.emit(event.text)
-                }
             }
         }
     }
-
-    /** The id of the model the recognizer was built from, or null if none is loaded. */
-    val loadedModelId: String? get() = loadedConfig?.modelId
 
     /** Called by the capture service right before it starts feeding audio. */
     fun beginCapture() {
@@ -384,22 +374,6 @@ class SpeechRecognizerEngine(
         }
     }
 
-    /**
-     * Initializes the recognizer asynchronously in a background coroutine worker.
-     * If the selected model is not installed, sets [RecognizerState.NotReady].
-     */
-    fun initializeEngineAsync(onComplete: ((Boolean) -> Unit)? = null) {
-        scope.launch(Dispatchers.IO) {
-            if (resolveModelForLoad() == null) {
-                _engineState.value = RecognizerState.NotReady
-                onComplete?.invoke(false)
-                return@launch
-            }
-            val success = initEngine()
-            onComplete?.invoke(success)
-        }
-    }
-
     data class LoadedModelFiles(
         val model: AsrModelConfig,
         val files: ModelManager.ResolvedModelFiles
@@ -420,13 +394,6 @@ class SpeechRecognizerEngine(
             hint in model.languageHints -> hint
             else -> null
         }
-    }
-
-    /**
-     * Checks if the selected model has complete, verified ONNX files on disk.
-     */
-    fun hasValidModelFilesOnDisk(): Boolean {
-        return resolveModelForLoad() != null
     }
 
     /**
@@ -777,18 +744,5 @@ class SpeechRecognizerEngine(
         onlineStream = null
         onlineRecognizer = null
         offlineRecognizer = null
-    }
-
-    /**
-     * Terminates the speech recognizer, releases all native resources,
-     * and cancels internal coroutines.
-     */
-    fun terminate() {
-        release()
-        try {
-            utteranceEvents.close()
-            scope.coroutineContext[Job]?.cancelChildren()
-            scope.cancel()
-        } catch (_: Exception) {}
     }
 }

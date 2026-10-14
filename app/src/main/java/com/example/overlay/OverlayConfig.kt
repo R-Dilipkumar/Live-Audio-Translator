@@ -77,7 +77,6 @@ data class OverlaySettings(
     val fontSizeSp: Float = 17f,
     val opacity: Float = 0.95f,
     val showOriginal: Boolean = true,
-    val isCollapsed: Boolean = false,
     val isPaused: Boolean = false,
     val isLocked: Boolean = false,
     val maxSubtitleLines: Int = 2, // 1 to 4 visible lines

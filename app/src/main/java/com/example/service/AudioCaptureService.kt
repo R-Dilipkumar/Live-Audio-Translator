@@ -47,8 +47,7 @@ class AudioCaptureService : Service() {
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private var mediaProjection: MediaProjection? = null
-    // Kept so ACTION_SWITCH_TO_MIC can unregister it; otherwise stopping the projection
-    // fires onStop(), which would tear down the new mic capture too
+    // Unregistered before the projection is stopped, so our own stop doesn't run stopCapture() again
     private var projectionCallback: MediaProjection.Callback? = null
     private var audioRecord: AudioRecord? = null
     @Volatile private var isCapturing = false
@@ -67,7 +66,6 @@ class AudioCaptureService : Service() {
     companion object {
         const val ACTION_START_INTERNAL_CAPTURE = "com.example.action.START_INTERNAL_CAPTURE"
         const val ACTION_START_MIC_CAPTURE = "com.example.action.START_MIC_CAPTURE"
-        const val ACTION_SWITCH_TO_MIC = "com.example.action.SWITCH_TO_MIC"
         const val ACTION_STOP_CAPTURE = "com.example.action.STOP_CAPTURE"
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
@@ -88,14 +86,6 @@ class AudioCaptureService : Service() {
         // In-app error banner message for UI
         private val _serviceErrorMessage = MutableStateFlow<String?>(null)
         val serviceErrorMessage: StateFlow<String?> = _serviceErrorMessage.asStateFlow()
-
-        fun clearServiceError() {
-            _serviceErrorMessage.value = null
-        }
-
-        // DRM / continuous absolute silence detection state
-        private val _isDrmSilenceDetected = MutableStateFlow(false)
-        val isDrmSilenceDetected: StateFlow<Boolean> = _isDrmSilenceDetected.asStateFlow()
 
         // BUG 2 FIX: All shared singleton fields must be @Volatile to prevent instruction-reordering
         // NPE under concurrent access (e.g., Quick Settings tile + main app starting simultaneously).
@@ -326,44 +316,6 @@ class AudioCaptureService : Service() {
                 // BUG 6 FIX: Use FOREGROUND_SERVICE_TYPE_MICROPHONE for mic capture,
                 // NOT FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION (throws SecurityException on Android 14+)
                 startForegroundForMic()
-                _isDrmSilenceDetected.value = false
-                startMicrophoneCapture()
-            }
-
-            ACTION_SWITCH_TO_MIC -> {
-                Log.i(TAG, "Switching to Microphone capture mode on user request")
-                _isDrmSilenceDetected.value = false
-                // Stop current recording loop
-                isCapturing = false
-                captureJob?.cancel()
-                try {
-                    audioRecord?.stop()
-                    audioRecord?.release()
-                } catch (_: Exception) {}
-                audioRecord = null
-                try {
-                    projectionCallback?.let { mediaProjection?.unregisterCallback(it) }
-                    mediaProjection?.stop()
-                } catch (_: Exception) {}
-                projectionCallback = null
-                mediaProjection = null
-
-                // Android 14+ requires the foreground service type to match: switch from
-                // MEDIA_PROJECTION to MICROPHONE before recording from the mic
-                try {
-                    startForegroundForMic()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Could not switch foreground service to microphone type", e)
-                    NotificationHelper.showErrorNotification(
-                        this,
-                        "Microphone Switch Failed",
-                        "Could not switch to microphone capture: ${e.localizedMessage}"
-                    )
-                    stopCapture()
-                    return START_NOT_STICKY
-                }
-
-                // Start mic capture
                 startMicrophoneCapture()
             }
         }
@@ -804,7 +756,6 @@ class AudioCaptureService : Service() {
                     audioBufferChannel.close()
                     speechEngine.flushCurrentSegment()
                     _liveAudioDb.value = 0f
-                    _isDrmSilenceDetected.value = false
                 }
             }
 
@@ -846,13 +797,13 @@ class AudioCaptureService : Service() {
         audioRecord = null
 
         try {
+            projectionCallback?.let { mediaProjection?.unregisterCallback(it) }
             mediaProjection?.stop()
         } catch (_: Exception) {}
         mediaProjection = null
         projectionCallback = null
 
         _liveAudioDb.value = 0f
-        _isDrmSilenceDetected.value = false
         _isServiceRunning.value = false
 
         // Release WakeLock

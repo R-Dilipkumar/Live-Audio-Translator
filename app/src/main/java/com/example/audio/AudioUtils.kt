@@ -69,32 +69,6 @@ object AudioUtils {
     }
 
     /**
-     * Converts a raw stereo PCM byte/short buffer directly to 16 kHz normalized mono floats
-     * for direct consumption by speech recognition models.
-     */
-    fun processRawAudioTo16kMonoFloats(
-        stereoPcmBuffer: ShortArray,
-        readShorts: Int,
-        sampleRate: Int,
-        isStereo: Boolean
-    ): FloatArray {
-        val monoShorts = if (isStereo) {
-            downmixStereoToMono(stereoPcmBuffer, readShorts)
-        } else {
-            val validRead = min(readShorts, stereoPcmBuffer.size)
-            if (validRead <= 0) ShortArray(0) else stereoPcmBuffer.copyOf(validRead)
-        }
-
-        val resampledShorts = if (sampleRate > 0 && sampleRate != 16000) {
-            resampleLinear(monoShorts, sampleRate, 16000)
-        } else {
-            monoShorts
-        }
-
-        return normalizeToFloat(resampledShorts)
-    }
-
-    /**
      * Converts interleaved stereo (or mono) 16-bit PCM to mono floats in [-1, 1] at the original
      * sample rate. Resampling is done separately by a [StreamingResampler] that keeps its state
      * across buffers.

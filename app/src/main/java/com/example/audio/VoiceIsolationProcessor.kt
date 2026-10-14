@@ -55,26 +55,6 @@ class BiquadFilter(
 
             return BiquadFilter(b0, b1, b2, a1, a2)
         }
-
-        /**
-         * Creates a 2nd-order Butterworth Low-Pass filter.
-         * Default Q = 0.7071
-         */
-        fun createLowPass(sampleRate: Float, cutoffFreq: Float, q: Float = 0.7071f): BiquadFilter {
-            val omega = (2.0 * PI * cutoffFreq / sampleRate).toFloat()
-            val cosOmega = cos(omega)
-            val sinOmega = sin(omega)
-            val alpha = sinOmega / (2.0f * q)
-
-            val a0 = 1.0f + alpha
-            val b0 = ((1.0f - cosOmega) / 2.0f) / a0
-            val b1 = (1.0f - cosOmega) / a0
-            val b2 = ((1.0f - cosOmega) / 2.0f) / a0
-            val a1 = (-2.0f * cosOmega) / a0
-            val a2 = (1.0f - alpha) / a0
-
-            return BiquadFilter(b0, b1, b2, a1, a2)
-        }
     }
 }
 

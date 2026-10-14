@@ -381,7 +381,6 @@ class ModelManager(private val context: Context) {
         const val VAD_DIR = "_vad"
         const val VAD_FILENAME = "silero_vad.onnx"
         const val VAD_URL = "$RELEASE_URL/silero_vad.onnx"
-        const val VAD_SIZE_BYTES = 643_854L
 
         // Old storage layout: one flat folder shared by every model. Only read by the migration.
         const val LEGACY_FLAT_DIR = "models/sherpa-onnx"
@@ -715,11 +714,6 @@ class ModelManager(private val context: Context) {
      * Checks if the currently selected ASR model is installed. Does not change the selection.
      */
     fun isSelectedModelReady(): Boolean = checkModelFilesOnDisk(_selectedModel.value)
-
-    /**
-     * True if any model is installed on disk. Strictly called on Dispatchers.IO.
-     */
-    fun hasAnyModelInstalled(): Boolean = availableModels.any { checkModelFilesOnDisk(it) }
 
     /**
      * Checks disk files for the given model. Strictly called on Dispatchers.IO.

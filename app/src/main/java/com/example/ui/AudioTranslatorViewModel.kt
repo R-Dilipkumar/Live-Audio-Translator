@@ -20,7 +20,6 @@ import com.example.service.AudioCaptureService
 import com.example.translate.LocalTranslatorEngine
 import com.example.translate.SubtitleOrderGate
 import com.example.translate.SupportedLanguage
-import com.example.translate.TranslationPackStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -82,13 +81,11 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     // Translation engine state
     val sourceLanguage: StateFlow<SupportedLanguage> = translatorEngine.sourceLanguage
     val targetLanguage: StateFlow<SupportedLanguage> = translatorEngine.targetLanguage
-    val translationPackStatus: StateFlow<TranslationPackStatus> = translatorEngine.packStatus
     val availableLanguages: List<SupportedLanguage> = translatorEngine.availableLanguages
     val targetAvailableLanguages: List<SupportedLanguage> = translatorEngine.targetAvailableLanguages
     val downloadedLanguages: StateFlow<Set<String>> = translatorEngine.downloadedLanguages
     val downloadingPacks: StateFlow<Map<String, Int>> = translatorEngine.downloadingPacks
     val lastDetectedLanguage: StateFlow<String?> = translatorEngine.lastDetectedLanguage
-    val isTranslationModelMissing: StateFlow<Boolean> = translatorEngine.isModelMissing
 
     // Offloaded storage and readiness state flows (prevent Choreographer frame drops)
     val availableStorageMb: StateFlow<Long> = modelManager.availableStorageMb
@@ -114,28 +111,6 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
-    fun isAsrModelReady(model: AsrModelConfig): Boolean {
-        return readyModelIds.value.contains(model.id)
-    }
-
-    fun downloadAllModels() {
-        val availableMb = getAvailableStorageMb()
-        if (availableMb < 150L) {
-            val error = "Insufficient storage: At least 150MB of free space is required to download offline models (Available: ${availableMb}MB)."
-            showError(error)
-            return
-        }
-        downloadAsrModel(selectedAsrModel.value)
-        downloadTranslationModels()
-    }
-
-    // Live display (starts clean and empty, avoiding synthetic status items in the live feed)
-    private val _currentOriginalSpeech = MutableStateFlow("")
-    val currentOriginalSpeech: StateFlow<String> = _currentOriginalSpeech.asStateFlow()
-
-    private val _currentTranslatedSpeech = MutableStateFlow("")
-    val currentTranslatedSpeech: StateFlow<String> = _currentTranslatedSpeech.asStateFlow()
-
     // Translation of the sentence still being spoken (empty once that sentence is final)
     private val _liveDraftTranslation = MutableStateFlow("")
     val liveDraftTranslation: StateFlow<String> = _liveDraftTranslation.asStateFlow()
@@ -144,10 +119,6 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
 
     // Floating overlay window state
     val isFloatingOverlayActive: StateFlow<Boolean> = com.example.overlay.FloatingSubtitleService.isOverlayActive
-    val floatingSettings: StateFlow<com.example.overlay.OverlaySettings> = com.example.overlay.FloatingSubtitleService.currentSettings
-
-    // DRM silence detection state
-    val isDrmSilenceDetected: StateFlow<Boolean> = AudioCaptureService.isDrmSilenceDetected
 
     // Capture mode toggle (Internal Media vs Microphone)
     private val _isMicMode = MutableStateFlow(false)
@@ -181,35 +152,8 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     init {
         viewModelScope.launch { settingsRepository.applyTunedDefaultsOnce() }
 
-        // Hydrate latest translation if service has already processed speech before ViewModel creation
-        translatorEngine.latestTranslation.value?.takeIf { subtitleOrderGate.accept(it) }?.let { initial ->
-            if (SpeechValidator.isGenuineSpeech(initial.originalText) && speechEngine.isConfirmedAsrEvent(initial.originalText)) {
-                _currentOriginalSpeech.value = initial.originalText
-            }
-            if (SpeechValidator.isGenuineSpeech(initial.translatedText)) {
-                _currentTranslatedSpeech.value = initial.translatedText
-            }
-        }
-
-        // Show recognized speech as it arrives. Translating it is the capture service's
-        // process-wide pipeline's job (AudioCaptureService.ensurePipeline); doing it here too
-        // would translate and save the last sentence twice after Stop.
-        viewModelScope.launch {
-            speechEngine.utteranceFlow.collect { event ->
-                when (event) {
-                    is com.example.asr.AsrUtteranceEvent.Partial -> {
-                        if (SpeechValidator.isGenuineSpeech(event.text)) {
-                            _currentOriginalSpeech.value = event.text
-                        }
-                    }
-                    is com.example.asr.AsrUtteranceEvent.Final -> {
-                        if (SpeechValidator.isGenuineSpeech(event.text) && speechEngine.isConfirmedAsrEvent(event.text)) {
-                            _currentOriginalSpeech.value = event.text
-                        }
-                    }
-                }
-            }
-        }
+        // Recognized speech is shown from speechEngine.partialTextFlow and translated by the
+        // capture service's process-wide pipeline (AudioCaptureService.ensurePipeline).
 
         // Collect completed translations for live UI display. Only real translations are shown
         // as translated text; status results ("Detecting language…", "Translation unavailable",
@@ -217,12 +161,8 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         viewModelScope.launch {
             translatorEngine.translationFlow.collect { result ->
                 if (!SpeechValidator.isGenuineSpeech(result.originalText) || !subtitleOrderGate.accept(result)) return@collect
-                _currentOriginalSpeech.value = result.originalText
                 if (result.status.isTranslation) {
                     _packMissingMessage.value = null
-                    if (SpeechValidator.isGenuineSpeech(result.translatedText)) {
-                        _currentTranslatedSpeech.value = result.translatedText
-                    }
                     _liveDraftTranslation.value = if (result.isFinal) "" else result.translatedText
                 } else {
                     if (result.status == com.example.translate.TranslationStatus.PACK_MISSING) {
@@ -312,14 +252,6 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         ContextCompat.startForegroundService(context, intent)
     }
 
-    fun switchToMicMode() {
-        _isMicMode.value = true
-        val intent = Intent(context, AudioCaptureService::class.java).apply {
-            action = AudioCaptureService.ACTION_SWITCH_TO_MIC
-        }
-        ContextCompat.startForegroundService(context, intent)
-    }
-
     fun stopCapture() {
         val intent = Intent(context, AudioCaptureService::class.java).apply {
             action = AudioCaptureService.ACTION_STOP_CAPTURE
@@ -372,30 +304,6 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         initializeSpeechRecognizer()
     }
 
-    fun downloadTranslationModels() {
-        val availableMb = modelManager.getAvailableStorageMb()
-        if (availableMb < 150L) {
-            val error = "Insufficient storage: At least 150MB of free space is required to download offline translation packs (Available: ${availableMb}MB)."
-            showError(error)
-            return
-        }
-        viewModelScope.launch {
-            translatorEngine.downloadRequiredModels()
-        }
-    }
-
-    fun downloadModelPairExplicitly(srcCode: String, tgtCode: String) {
-        val availableMb = modelManager.getAvailableStorageMb()
-        if (availableMb < 150L) {
-            val error = "Insufficient storage: At least 150MB of free space is required to download offline translation packs (Available: ${availableMb}MB)."
-            showError(error)
-            return
-        }
-        viewModelScope.launch {
-            translatorEngine.downloadModelPairExplicitly(srcCode, tgtCode)
-        }
-    }
-
     fun setSourceLanguage(lang: SupportedLanguage) {
         _packMissingMessage.value = null
         translatorEngine.setSourceLanguage(lang)
@@ -427,32 +335,6 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
-    fun clearCurrentDisplay() {
-        _currentOriginalSpeech.value = ""
-        _currentTranslatedSpeech.value = ""
-        translatorEngine.clearRecentTranslations()
-    }
-
-    /**
-     * Strictly validates speech content and origin before saving to Room database.
-     */
-    fun saveTranscriptIfValid(entity: TranscriptEntity) {
-        if (SpeechValidator.isGenuineSpeech(entity.originalText) &&
-            SpeechValidator.isGenuineSpeech(entity.translatedText) &&
-            speechEngine.isConfirmedAsrEvent(entity.originalText)
-        ) {
-            viewModelScope.launch(Dispatchers.IO) {
-                try {
-                    transcriptDao.insert(entity)
-                } catch (e: Exception) {
-                    Log.w("AudioTranslatorVM", "Failed inserting transcript: ${e.message}")
-                }
-            }
-        } else {
-            Log.d("AudioTranslatorVM", "Suppressed non-speech transcript from manual save: ${entity.originalText}")
-        }
-    }
-
     fun startFloatingOverlay() {
         val intent = Intent(context, com.example.overlay.FloatingSubtitleService::class.java).apply {
             action = com.example.overlay.FloatingSubtitleService.ACTION_START_OVERLAY
@@ -465,10 +347,6 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
             action = com.example.overlay.FloatingSubtitleService.ACTION_STOP_OVERLAY
         }
         context.startService(intent)
-    }
-
-    fun updateFloatingSettings(settings: com.example.overlay.OverlaySettings) {
-        com.example.overlay.FloatingSubtitleService.updateSettings(settings)
     }
 
     fun dismissError() {
