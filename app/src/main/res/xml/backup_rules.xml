@@ -9,4 +9,6 @@
     <exclude domain="database" path="liveaudio_translate.db-shm" />
     <exclude domain="database" path="liveaudio_translate.db-wal" />
     <exclude domain="file" path="models" />
+    <!-- Recorded audio from the "Save recognizer audio" developer option -->
+    <exclude domain="file" path="debug" />
 </full-backup-content>

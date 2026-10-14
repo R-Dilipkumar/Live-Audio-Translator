@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
@@ -139,7 +140,8 @@ class LocalTranslatorEngine(private val context: Context) {
     private val _latestTranslation = MutableStateFlow<TranslationResult?>(null)
     val latestTranslation: StateFlow<TranslationResult?> = _latestTranslation.asStateFlow()
 
-    private var activeTranslator: Translator? = null
+    // Translators live only in translatorCache (created on first use by getOrCreateTranslator),
+    // so one is never closed while the cache still hands it out
     private val maxCacheSize = 3
     private val cacheLock = Any()
     // LRU cache bounded to max 3 translators (each holds ~30-50MB native RAM).
@@ -182,7 +184,13 @@ class LocalTranslatorEngine(private val context: Context) {
     // All translation requests go through this queue: one consumer, in order.
     private val translationQueue = TranslationQueue(
         scope = scope,
-        process = { request -> processTranslation(request) },
+        process = { request ->
+            processTranslation(request).also { result ->
+                if (request.isFinal) {
+                    Log.d(TAG, "Final [${result.sourceLangCode}] \"${request.text}\" -> \"${result.translatedText}\" (${result.status})")
+                }
+            }
+        },
         emit = { result -> emitTranslation(result) }
     )
 
@@ -291,9 +299,6 @@ class LocalTranslatorEngine(private val context: Context) {
     suspend fun checkAndPrepareTranslator() = withContext(Dispatchers.IO) {
         _packStatus.value = TranslationPackStatus.Checking
         try {
-            activeTranslator?.close()
-            activeTranslator = null
-
             val srcLang = _sourceLanguage.value
             val tgtLang = _targetLanguage.value
 
@@ -322,12 +327,7 @@ class LocalTranslatorEngine(private val context: Context) {
                 val englishDownloaded = if (needsPivot) isModelDownloadedOnDisk(TranslateLanguage.ENGLISH) else true
 
                 if (srcDownloaded && tgtDownloaded && englishDownloaded) {
-                    val options = TranslatorOptions.Builder()
-                        .setSourceLanguage(srcLang.code)
-                        .setTargetLanguage(tgtLang.code)
-                        .build()
-                    // Client created directly WITHOUT calling downloadModelIfNeeded()
-                    activeTranslator = Translation.getClient(options)
+                    // The translator itself is created on first use (getOrCreateTranslator)
                     _packStatus.value = TranslationPackStatus.Ready
                     _isModelMissing.value = false
                 } else {
@@ -356,9 +356,9 @@ class LocalTranslatorEngine(private val context: Context) {
             Log.w(TAG, "Cannot download language pack: RemoteModelManager is null. Offline fallback will be used.")
             return@withContext false
         }
-        val currentMap = _downloadingPacks.value.toMutableMap()
-        currentMap[langCode] = 20
-        _downloadingPacks.value = currentMap
+        // Always a new map through update { }: changing the map held by the StateFlow in place
+        // hides the change from collectors, and a stale copy would undo other downloads' progress
+        _downloadingPacks.update { it + (langCode to 20) }
 
         val model = TranslateRemoteModel.Builder(langCode).build()
         val conditions = DownloadConditions.Builder().build()
@@ -366,16 +366,13 @@ class LocalTranslatorEngine(private val context: Context) {
         var lastException: Exception? = null
         repeat(maxRetries) { attempt ->
             try {
-                currentMap[langCode] = 20 + (attempt * 15)
-                _downloadingPacks.value = currentMap.toMap()
+                _downloadingPacks.update { it + (langCode to (20 + attempt * 15)) }
 
                 mm.download(model, conditions).await()
 
-                currentMap[langCode] = 100
-                _downloadingPacks.value = currentMap.toMap()
+                _downloadingPacks.update { it + (langCode to 100) }
                 delay(300)
-                currentMap.remove(langCode)
-                _downloadingPacks.value = currentMap.toMap()
+                _downloadingPacks.update { it - langCode }
 
                 refreshDownloadedLanguages()
                 checkAndPrepareTranslator()
@@ -390,8 +387,7 @@ class LocalTranslatorEngine(private val context: Context) {
         }
 
         Log.e(TAG, "All $maxRetries download attempts failed for $langCode", lastException)
-        currentMap.remove(langCode)
-        _downloadingPacks.value = currentMap.toMap()
+        _downloadingPacks.update { it - langCode }
         NotificationHelper.showErrorNotification(
             context,
             "Language Pack Download Failed",
@@ -461,10 +457,7 @@ class LocalTranslatorEngine(private val context: Context) {
 
         try {
             Log.i(TAG, "Explicit user download initiated for model pair: $key")
-            val currentMap = _downloadingPacks.value.toMutableMap()
-            currentMap[srcCode] = 20
-            currentMap[tgtCode] = 20
-            _downloadingPacks.value = currentMap
+            _downloadingPacks.update { it + (srcCode to 20) + (tgtCode to 20) }
 
             val options = TranslatorOptions.Builder()
                 .setSourceLanguage(srcCode)
@@ -474,10 +467,12 @@ class LocalTranslatorEngine(private val context: Context) {
             translator.downloadModelIfNeeded(conditions).await()
 
             synchronized(cacheLock) {
-                translatorCache[key] = translator
+                // Replacing a cached translator: close the old one, nothing else holds it
+                translatorCache.put(key, translator)?.let { old ->
+                    if (old !== translator) runCatching { old.close() }
+                }
             }
             if (_sourceLanguage.value.code == srcCode && _targetLanguage.value.code == tgtCode) {
-                activeTranslator = translator
                 _packStatus.value = TranslationPackStatus.Ready
                 _isModelMissing.value = false
             }
@@ -489,10 +484,7 @@ class LocalTranslatorEngine(private val context: Context) {
             false
         } finally {
             activeDownloadKeys.remove(key)
-            val currentMap = _downloadingPacks.value.toMutableMap()
-            currentMap.remove(srcCode)
-            currentMap.remove(tgtCode)
-            _downloadingPacks.value = currentMap
+            _downloadingPacks.update { it - srcCode - tgtCode }
         }
     }
 
@@ -525,16 +517,22 @@ class LocalTranslatorEngine(private val context: Context) {
      * Queues a translation request. Requests are translated one at a time, in order; only the
      * newest partial is kept, and a partial is dropped once a final for its utterance is queued.
      */
-    fun translateText(originalText: String, isFinal: Boolean = true, utteranceId: Long = 0L) {
+    /**
+     * [languageHint] is the language the speech model heard (Accuracy mode). With Auto-Detect it
+     * is used instead of guessing from the text, which tells Japanese and Chinese apart reliably.
+     */
+    fun translateText(originalText: String, isFinal: Boolean = true, utteranceId: Long = 0L, languageHint: String? = null) {
         val trimmed = originalText.trim()
         if (trimmed.isEmpty()) return
-        translationQueue.submit(TranslationRequest(trimmed, isFinal, utteranceId))
+        translationQueue.submit(TranslationRequest(trimmed, isFinal, utteranceId, languageHint))
     }
 
     /**
-     * Identifies the language of [text] with ML Kit Language ID. Returns the best language whose
-     * confidence reaches [confidenceThreshold], else the last confidently detected language,
-     * else null.
+     * Identifies the language of [text] with ML Kit Language ID, choosing only among languages
+     * that can be translated. Returns the best of those whose confidence reaches
+     * [confidenceThreshold], else the last confidently detected one, else null. A line that is
+     * confidently in a language without a pack returns that language (so it is reported as
+     * missing) without changing the remembered language.
      */
     private suspend fun detectSourceLanguage(text: String): String? {
         val candidates = try {
@@ -555,7 +553,14 @@ class LocalTranslatorEngine(private val context: Context) {
             Log.w(TAG, "Language identification failed: ${e.message}")
             emptyList()
         }
-        return languageDetectionGate.resolve(candidates, confidenceThreshold)
+
+        // Only languages that can actually be translated: pack downloaded, or the target itself
+        if (!downloadedLanguagesLoaded) refreshDownloadedLanguages()
+        val tgtCode = _targetLanguage.value.code
+        val downloaded = _downloadedLanguages.value
+        return languageDetectionGate.resolveAmong(candidates, confidenceThreshold, text) { code ->
+            code == tgtCode || code in downloaded
+        }
     }
 
     // Maps an ML Kit Language ID tag to a translatable language code. Romanized variants
@@ -595,7 +600,13 @@ class LocalTranslatorEngine(private val context: Context) {
                 status = status
             )
 
-        val detectedCode = if (srcLang.isAutoDetect) detectSourceLanguage(text) else srcLang.code
+        val heardCode = request.languageHint?.let { TranslateLanguage.fromLanguageTag(it) }
+        val detectedCode = when {
+            !srcLang.isAutoDetect -> srcLang.code
+            // The speech model heard the language from the sound: trust it over the text
+            heardCode != null -> heardCode.also { languageDetectionGate.remember(it) }
+            else -> detectSourceLanguage(text)
+        }
         if (detectedCode == null) {
             return result("Detecting language…", TranslationStatus.LANGUAGE_UNKNOWN, "auto", null)
         }
@@ -771,8 +782,6 @@ class LocalTranslatorEngine(private val context: Context) {
     fun release() {
         try {
             scope.cancel()
-            activeTranslator?.close()
-            activeTranslator = null
             languageIdentifier?.close()
             synchronized(cacheLock) {
                 translatorCache.values.forEach { 

@@ -22,7 +22,7 @@ Most live-translation apps send your audio to a cloud service, only listen to th
 - **Subtitles over any app.** A floating box on top of YouTube, games, calls and more.
 - **Hears your phone's own audio**, not just the microphone.
 - **Fully on the phone.** No account, no API key, no audio uploaded.
-- **Live, word by word.** Text appears while people are still speaking.
+- **Fast or accurate, your choice.** Instant shows words while people speak; About 1 second waits for each phrase and gets far more right, with punctuation.
 - **Works on any Android 10+ phone**, not only Pixels.
 - **Free and open source** under the MIT license.
 
@@ -36,20 +36,29 @@ Test builds are signed with a debug key, so Android may warn that the developer 
 
 ## How to use
 
-1. **Download a speech model.** Open **Manage Models** and download the model for the language you will listen to. For Japanese, use **Multilingual**.
-2. **Download translation packs.** In the same tab, download the pack for the spoken language and the pack for the language you read.
-3. **Pick languages.** On the **Translate** tab, choose the spoken language (or Auto-Detect) and the language to translate to.
-4. **Start.** Choose **Internal** (audio from other apps) or **Mic**, press **Start**, and allow screen/audio capture when Android asks.
-5. **Open the overlay.** Press **Launch Overlay** to show subtitles on top of other apps. Drag it anywhere; use the gear icon for size, lines and theme.
+1. **Download a speech model.** Open the **Models** tab and download a model for the language you will listen to. For Japanese, Chinese or Korean, **SenseVoice** is the most accurate. For live word-by-word text, use **Multilingual**.
+2. **Download translation packs.** In the same tab, download the pack for the spoken language and the pack for the language you read. If one is missing, the main screen tells you which.
+3. **Pick languages.** On the **Translate** tab, choose the **Spoken language** (or Auto-Detect) and **Subtitles in**. The line below shows which speech model is listening and whether it understands that language.
+4. **Start.** Choose **Phone audio** or **Microphone**, press **Start**, and allow audio capture when Android asks. The floating subtitles open by themselves (you can turn that off in Settings).
+5. **Use the floating subtitles.** Drag the top bar to move them, drag the corner to resize, and double-tap to hide the controls. The gear icon sets text size, lines, style and theme.
 
-Some apps block audio capture (DRM-protected video, for example); LiveSub then receives only silence. After about 10 seconds of that, the overlay shows a warning with a **Use Mic** button that switches to the microphone.
+**Preferred latency** (Settings): **Instant** uses a streaming model, so words appear while spoken. **About 1 second** uses a whole-phrase model: text appears when the speaker pauses, with punctuation and far fewer mistakes. Each latency keeps its own model.
+
+Some apps block audio capture (DRM-protected video, for example); LiveSub then receives only silence.
 
 ## Features
 
 - **Captures app audio or the microphone.** Internal capture uses Android's audio playback capture (Android 10+).
-- **Live speech recognition** with streaming Zipformer models from Sherpa-ONNX. Words appear while they are spoken.
+- **Two kinds of speech recognition** from Sherpa-ONNX:
+  - **Instant:** streaming models; words appear while they are spoken.
+  - **About 1 second:** a speech detector finds each phrase and a stronger model (SenseVoice, Moonshine, Parakeet, GigaAM or Whisper) recognizes it whole, with punctuation. Music and laughter are ignored, and the model can be locked to the spoken language.
+- **Whole-sentence translation:** pieces split by short pauses are joined before translating, so meaning isn't cut in half.
 - **On-device translation** with Google ML Kit, including automatic detection of the spoken language.
-- **Floating subtitles** over any app: draggable, 1–3 lines, adjustable text size, background and themes. The newest words always stay visible.
+- **Floating subtitles** over any app, in three styles:
+  - **Roll-up:** lines stack and roll up; scroll back to reread, and it returns to live by itself.
+  - **Movie:** whole cards that stay long enough to read.
+  - **Live:** one line rewritten as words arrive.
+  You can resize it, show 1–4 lines, and change text size, background and themes. Double-tap hides the controls.
 - **Live feed and history** in the app, saved on the phone. Tap a line to copy it.
 - **Quick Settings tile** to start and stop without opening the app.
 - **Audio clean-up tuned for speech**: rumble filter, a boost for quiet or husky voices, and an optional noise gate.
@@ -57,7 +66,9 @@ Some apps block audio capture (DRM-protected video, for example); LiveSub then r
 
 ## Speech models
 
-One streaming model per language, downloaded from the official [Sherpa-ONNX model release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models). Sizes are download sizes.
+All models come from the official [Sherpa-ONNX model release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models) and are downloaded inside the app. Sizes are download sizes.
+
+**Instant** (streaming, words appear while spoken)
 
 | Model | Languages | Download | Notes |
 |---|---|---|---|
@@ -71,7 +82,27 @@ One streaming model per language, downloaded from the official [Sherpa-ONNX mode
 | Russian | Russian | 86 MB | Vosk |
 | Bengali | Bengali | 83 MB | Vosk |
 
-Kroko models are community models under CC-BY-SA. Other models use their authors' licenses.
+**About 1 second** (whole phrases, most accurate)
+
+| Model | Languages | Download | Notes |
+|---|---|---|---|
+| SenseVoice | Japanese, Chinese, English, Korean, Cantonese | 155 MB | Best for anime and dramas; ignores music and laughter |
+| Moonshine | Japanese, English, Chinese, Spanish, Arabic, Vietnamese, Ukrainian, Korean (one model each) | 47–114 MB | Small and fast |
+| Parakeet v3 | 25 European languages | 465 MB | NVIDIA, punctuation and capitals |
+| GigaAM v3 | Russian | 162 MB | |
+| Whisper Base | 99 languages | 198 MB | Hindi, Tamil, Thai, Turkish and more |
+| Whisper Small | 99 languages | 610 MB | More accurate, slower |
+
+About-1-second models also download the Silero speech detector (under 1 MB).
+
+| License | Models |
+|---|---|
+| Apache-2.0 | Multilingual, Chinese, Korean, Russian (Vosk), Bengali |
+| CC-BY-SA (Kroko community) | English, Spanish, French, German |
+| FunASR model license | SenseVoice |
+| Moonshine Community License | Moonshine |
+| CC-BY-4.0 | Parakeet v3 |
+| MIT | GigaAM v3, Whisper, Silero speech detector |
 
 Translation packs are Google ML Kit models, about 30 MB each.
 
@@ -80,16 +111,22 @@ Translation packs are Google ML Kit models, about 30 MB each.
 ```mermaid
 flowchart LR
     A[App audio or mic] --> B[16 kHz resampling<br/>and clean-up]
-    B --> C[Sherpa-ONNX<br/>streaming recognizer]
-    C --> D[Ordered translation queue<br/>ML Kit]
+    B --> C1[Instant:<br/>streaming recognizer]
+    B --> C2[About 1 second:<br/>speech detector +<br/>whole-phrase model]
+    C1 --> S[Whole sentences]
+    C2 --> S
+    S --> D[Ordered translation queue<br/>ML Kit]
     D --> E[Floating subtitles]
     D --> F[Live feed and history]
 ```
 
-- **Capture** (`service/AudioCaptureService.kt`): a foreground service reads audio, converts it to 16 kHz mono with an anti-aliasing resampler, and applies the optional filter, boost and gate.
-- **Recognition** (`asr/SpeechRecognizerEngine.kt`): feeds audio to Sherpa-ONNX and emits draft and finished sentences in order. Each sentence starts on a fresh stream. `asr/ModelManager.kt` downloads, installs and selects models; each model lives in its own folder.
-- **Translation** (`translate/`): one ordered queue with a time limit, ML Kit language detection for Auto-Detect, and clear messages when a language pack is missing.
-- **Display** (`overlay/`, `ui/`): the overlay service and the app read the same results; older or out-of-order results are ignored.
+- **Capture** (`service/AudioCaptureService.kt`): a foreground service reads audio, converts it to 16 kHz mono with an anti-aliasing resampler, and applies the optional filter, boost and gate. It also forwards recognized speech to the translator and saves finished lines to history.
+- **Recognition** (`asr/`):
+  - `SpeechRecognizerEngine.kt` runs the chosen model and emits draft and finished sentences in order. Instant models use the streaming recognizer; About-1-second models use `OfflinePhraseRecognizer.kt` (Silero speech detector plus a whole-phrase model).
+  - `SentenceAssembler.kt` joins pieces into sentences, and `NoiseTextFilter.kt` drops text that is really music or noise.
+  - `ModelManager.kt` downloads, installs (only when complete) and selects models; each model lives in its own folder.
+- **Translation** (`translate/`): one ordered queue with a time limit, the heard language or ML Kit language detection for Auto-Detect, and clear messages when a language pack is missing.
+- **Display** (`overlay/`, `ui/`): the overlay service and the app read the same results; older or out-of-order results are ignored. `overlay/SubtitlePager.kt` times Movie-style cards.
 
 ## Building
 
@@ -124,7 +161,7 @@ Release builds read `KEYSTORE_PATH`, `STORE_PASSWORD` and `KEY_PASSWORD` from en
 - Audio, transcripts and translations are processed on the phone and are not uploaded.
 - The internet is used to download models (HTTPS only) and language packs. The app has no cloud or analytics SDKs of its own.
 - Google ML Kit may send anonymous usage statistics to Google, as described in its terms.
-- History is stored on the phone until you clear it. It is left out of Android cloud backups, and downloaded models are left out of backups and device transfers.
+- History is stored on the phone until you clear it. It is left out of Android cloud backups (a phone-to-phone transfer brings it to your new phone). Downloaded models and recorded debug audio are left out of backups and transfers.
 
 ## Contributing
 
@@ -133,3 +170,8 @@ Bug reports and pull requests are welcome. Please run `./gradlew :app:testDebugU
 ## License
 
 LiveSub's code is released under the [MIT License](LICENSE). Speech models and translation packs are downloaded separately and keep their own licenses (see [Speech models](#speech-models)).
+
+LiveSub uses these open-source libraries:
+- [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0) with ONNX Runtime (MIT).
+- AndroidX, Jetpack Compose, Room, DataStore, Kotlin coroutines, OkHttp and Apache Commons Compress (Apache-2.0).
+- Translation and language detection use [Google ML Kit](https://developers.google.com/ml-kit/terms), under Google's ML Kit terms.

@@ -42,8 +42,9 @@ class AudioCaptureService : Service() {
     private val TAG = "AudioCaptureService"
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var captureJob: Job? = null
-    private var recognitionForwardJob: Job? = null
-    private var translationPersistJob: Job? = null
+    // Counts captures, so a stop requested for an earlier capture never ends a newer one
+    @Volatile private var captureGeneration = 0
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private var mediaProjection: MediaProjection? = null
     // Kept so ACTION_SWITCH_TO_MIC can unregister it; otherwise stopping the projection
@@ -59,6 +60,8 @@ class AudioCaptureService : Service() {
     @Volatile private var noiseGateLevel = 0f
     @Volatile private var isQuietVoiceBoostActive = true
     @Volatile private var isDebugRecordingActive = false
+    // "Open subtitles when starting": the floating window it opened closes again with every stop
+    @Volatile private var isAutoOverlayEnabled = true
     private var settingsObserverJob: Job? = null
 
     companion object {
@@ -74,9 +77,6 @@ class AudioCaptureService : Service() {
         // AudioRecord (~43 ms at 48 kHz stereo, ~256 ms at 16 kHz mono), so this holds
         // roughly 11-60 s of audio. When full, the oldest chunk is dropped to keep recent audio.
         const val AUDIO_BUFFER_CAPACITY = 256
-
-        // Seconds of pure digital silence from internal capture before suggesting the mic
-        private const val DRM_SILENCE_SECONDS = 10L
 
         // Global state for UI to observe
         private val _isServiceRunning = MutableStateFlow(false)
@@ -130,6 +130,79 @@ class AudioCaptureService : Service() {
                 }
             }
         }
+
+        private const val PIPELINE_TAG = "AudioCaptureService"
+        private const val PARTIAL_DEBOUNCE_MS = 480L
+
+        // Speech -> translation -> history runs for the whole process, not per capture. The last
+        // sentence is flushed after the capture loop ends, and its translation finishes after
+        // Stop; collectors tied to one capture were already cancelled by then, so it was lost.
+        private val pipelineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        private val pipelineStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        /**
+         * Starts, once per process, forwarding recognized speech to the translator and saving
+         * finished translations to history (also while the app is closed).
+         */
+        fun ensurePipeline(context: Context) {
+            if (!pipelineStarted.compareAndSet(false, true)) return
+            val appContext = context.applicationContext
+            val speechEngine = getSpeechEngine(appContext)
+            val translatorEngine = getTranslatorEngine(appContext)
+            val transcriptDao = AppDatabase.getInstance(appContext).transcriptDao()
+
+            // Partial drafts are throttled (~480 ms) and finals sent at once. The translator
+            // queue keeps only the newest partial, so a slow translation never builds a backlog.
+            pipelineScope.launch {
+                var lastPartialDispatchTime = 0L
+                speechEngine.utteranceFlow.collect { event ->
+                    when (event) {
+                        is com.example.asr.AsrUtteranceEvent.Partial -> {
+                            val now = System.currentTimeMillis()
+                            if (now - lastPartialDispatchTime >= PARTIAL_DEBOUNCE_MS && SpeechValidator.isGenuineSpeech(event.text)) {
+                                lastPartialDispatchTime = now
+                                Log.d(PIPELINE_TAG, "Forwarding throttled partial draft (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
+                                translatorEngine.translateText(event.text, isFinal = false, utteranceId = event.utteranceId)
+                            }
+                        }
+                        is com.example.asr.AsrUtteranceEvent.Final -> {
+                            if (SpeechValidator.isGenuineSpeech(event.text) && speechEngine.isConfirmedAsrEvent(event.text)) {
+                                Log.d(PIPELINE_TAG, "Forwarding confirmed Final utterance (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
+                                translatorEngine.translateText(event.text, isFinal = true, utteranceId = event.utteranceId, languageHint = event.language)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Only committed final translations of confirmed speech are saved, never drafts
+            pipelineScope.launch(Dispatchers.IO) {
+                translatorEngine.translationFlow.collect { result ->
+                    if (result.isFinal &&
+                        result.status.isTranslation &&
+                        SpeechValidator.isGenuineSpeech(result.originalText) &&
+                        SpeechValidator.isGenuineSpeech(result.translatedText) &&
+                        speechEngine.isConfirmedAsrEvent(result.originalText)
+                    ) {
+                        try {
+                            transcriptDao.insert(
+                                TranscriptEntity(
+                                    originalText = result.originalText,
+                                    translatedText = result.translatedText,
+                                    sourceLanguage = result.sourceLangCode,
+                                    targetLanguage = result.targetLangCode,
+                                    timestamp = result.timestamp
+                                )
+                            )
+                        } catch (e: Exception) {
+                            Log.w(PIPELINE_TAG, "Failed inserting transcript in background: ${e.message}")
+                        }
+                    } else if (result.isFinal) {
+                        Log.d(PIPELINE_TAG, "Suppressed non-speech transcript from Room persistence: ${result.originalText}")
+                    }
+                }
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -141,6 +214,7 @@ class AudioCaptureService : Service() {
         val settingsRepo = SettingsRepository(this)
         val speechEngine = getSpeechEngine(this)
         val translatorEngine = getTranslatorEngine(this)
+        ensurePipeline(this)
 
         settingsObserverJob?.cancel()
         settingsObserverJob = serviceScope.launch {
@@ -150,12 +224,15 @@ class AudioCaptureService : Service() {
                 isQuietVoiceBoostActive = settings.isQuietVoiceBoostEnabled
                 isDebugRecordingActive = settings.isDebugAudioRecordingEnabled
                 noiseGateLevel = settings.noiseGateThreshold
+                isAutoOverlayEnabled = settings.isAutoOverlayEnabled
 
                 speechEngine.silenceEndpointDelay = settings.silenceEndpointDelay
                 speechEngine.maxUtteranceWindow = settings.maxUtteranceWindow
                 speechEngine.noSpeechRestartDelay = settings.noSpeechRestartDelay
                 speechEngine.minSentenceLength = settings.minSentenceLength
                 speechEngine.singleCharacterMode = settings.singleCharacterMode
+                speechEngine.joinSentencePieces = settings.isSentenceJoiningEnabled
+                speechEngine.filterNoiseText = settings.isNoiseTextFilterEnabled
                 speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
 
                 translatorEngine.confidenceThreshold = settings.languageIdConfidence
@@ -526,10 +603,12 @@ class AudioCaptureService : Service() {
     ) {
         val speechEngine = getSpeechEngine(this)
         val translatorEngine = getTranslatorEngine(this)
-        val transcriptDao = AppDatabase.getInstance(this).transcriptDao()
         val settingsRepo = SettingsRepository(this)
+        // Translation and history saving run in the process-wide pipeline (see ensurePipeline)
+        ensurePipeline(this)
 
         isCapturing = true
+        val generation = ++captureGeneration
         captureJob?.cancel()
 
         captureJob = serviceScope.launch(Dispatchers.Default) {
@@ -547,11 +626,16 @@ class AudioCaptureService : Service() {
                 speechEngine.noSpeechRestartDelay = settings.noSpeechRestartDelay
                 speechEngine.minSentenceLength = settings.minSentenceLength
                 speechEngine.singleCharacterMode = settings.singleCharacterMode
+                speechEngine.joinSentencePieces = settings.isSentenceJoiningEnabled
+                speechEngine.filterNoiseText = settings.isNoiseTextFilterEnabled
                 speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
                 translatorEngine.confidenceThreshold = settings.languageIdConfidence
             } catch (e: Exception) {
                 Log.w(TAG, "Could not read settings before engine start: ${e.message}")
             }
+
+            // Accuracy-mode models can be locked to the chosen spoken language
+            speechEngine.spokenLanguageHint = translatorEngine.sourceLanguage.value.takeUnless { it.isAutoDetect }?.code
 
             // Await speechEngine.initEngine() completion before calling record.startRecording().
             // initEngine() is single-flight and returns at once if the selected model is already loaded.
@@ -578,69 +662,6 @@ class AudioCaptureService : Service() {
                 return@launch
             }
             _serviceErrorMessage.value = null
-
-            // Continuous background bridge: forward recognized speech to local translator
-            // Throttles Partial ASR draft emissions (~480ms) and immediately dispatches Final commits.
-            // The translator queue keeps only the newest partial, so a slow translation never
-            // builds a backlog of stale drafts.
-            recognitionForwardJob?.cancel()
-            recognitionForwardJob = serviceScope.launch(Dispatchers.Default) {
-                var lastPartialDispatchTime = 0L
-                val partialDebounceMs = 480L
-
-                speechEngine.utteranceFlow.collect { event ->
-                    when (event) {
-                        is com.example.asr.AsrUtteranceEvent.Partial -> {
-                            val now = System.currentTimeMillis()
-                            if (now - lastPartialDispatchTime >= partialDebounceMs) {
-                                if (SpeechValidator.isGenuineSpeech(event.text)) {
-                                    lastPartialDispatchTime = now
-                                    Log.d(TAG, "Forwarding throttled partial draft (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
-                                    translatorEngine.translateText(event.text, isFinal = false, utteranceId = event.utteranceId)
-                                }
-                            }
-                        }
-                        is com.example.asr.AsrUtteranceEvent.Final -> {
-                            if (SpeechValidator.isGenuineSpeech(event.text) && speechEngine.isConfirmedAsrEvent(event.text)) {
-                                Log.d(TAG, "Forwarding confirmed Final utterance (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
-                                translatorEngine.translateText(event.text, isFinal = true, utteranceId = event.utteranceId)
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Persist transcripts to Room in background even when main app is closed.
-            // Strictly verifies that the transcript contains genuine spoken dialogue, confirmed ASR events,
-            // and is a committed Final translation (never active partial drafts).
-            translationPersistJob?.cancel()
-            translationPersistJob = serviceScope.launch(Dispatchers.IO) {
-                translatorEngine.translationFlow.collect { result ->
-                    if (result.isFinal &&
-                        result.status.isTranslation &&
-                        SpeechValidator.isGenuineSpeech(result.originalText) &&
-                        SpeechValidator.isGenuineSpeech(result.translatedText) &&
-                        speechEngine.isConfirmedAsrEvent(result.originalText)
-                    ) {
-                        try {
-                            val entity = TranscriptEntity(
-                                originalText = result.originalText,
-                                translatedText = result.translatedText,
-                                sourceLanguage = result.sourceLangCode,
-                                targetLanguage = result.targetLangCode,
-                                timestamp = result.timestamp
-                            )
-                            transcriptDao.insert(entity)
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed inserting transcript in background: ${e.message}")
-                        }
-                    } else if (!result.isFinal) {
-                        // Draft translation: active UI display only, not persisted to Room
-                    } else {
-                        Log.d(TAG, "Suppressed non-speech transcript from Room persistence: ${result.originalText}")
-                    }
-                }
-            }
 
             // Dedicated High-Priority Audio Buffer:
             // Push raw PCM chunks immediately into a buffered Kotlin Channel<FloatArray>(capacity = AUDIO_BUFFER_CAPACITY).
@@ -673,10 +694,6 @@ class AudioCaptureService : Service() {
                 }
 
                 val shortBuffer = ShortArray(4096)
-                // DRM detection: count raw stereo samples of pure digital silence (internal capture only).
-                // Checked before the noise gate and boost, which change ordinary quiet audio.
-                val drmSilenceSampleLimit = sampleRate.toLong() * 2 * DRM_SILENCE_SECONDS
-                var consecutiveSilentSamples = 0L
                 // One resampler per capture: it carries filter state across buffers
                 val resampler = StreamingResampler(inRate = sampleRate, outRate = 16000)
                 voiceIsolationProcessor.reset()
@@ -704,22 +721,21 @@ class AudioCaptureService : Service() {
 
                     while (isCapturing && isActive) {
                         val readShorts = record.read(shortBuffer, 0, shortBuffer.size)
-                        if (readShorts > 0) {
-                            if (isStereo) {
-                                if (AudioUtils.isDigitalSilence(shortBuffer, readShorts)) {
-                                    consecutiveSilentSamples += readShorts
-                                    if (consecutiveSilentSamples >= drmSilenceSampleLimit && !_isDrmSilenceDetected.value) {
-                                        Log.w(TAG, "No app audio for ${DRM_SILENCE_SECONDS}s of internal capture; playback may be DRM-protected")
-                                        _isDrmSilenceDetected.value = true
-                                    }
-                                } else {
-                                    consecutiveSilentSamples = 0L
-                                    if (_isDrmSilenceDetected.value) {
-                                        _isDrmSilenceDetected.value = false
-                                    }
-                                }
+                        if (readShorts < 0) {
+                            // ERROR_DEAD_OBJECT (audio service restarted), ERROR_INVALID_OPERATION, ...:
+                            // the recording can't continue, and reading again at once would spin
+                            // at audio priority. After Stop this is the normal way out (record released).
+                            if (isCapturing && isActive) {
+                                Log.e(TAG, "AudioRecord.read failed with error $readShorts; ending capture")
+                                NotificationHelper.showErrorNotification(
+                                    this@AudioCaptureService,
+                                    "Audio Stream Interrupted",
+                                    "Audio capture stopped (error $readShorts). Press Start to try again."
+                                )
                             }
-
+                            break
+                        }
+                        if (readShorts > 0) {
                             // Downmix stereo to mono floats, then resample to 16 kHz with anti-aliasing
                             val floatSamples = resampler.process(
                                 AudioUtils.toMonoFloats(shortBuffer, readShorts, isStereo)
@@ -796,8 +812,16 @@ class AudioCaptureService : Service() {
 
             try {
                 // Keep the captureJob coroutine active while capturing
-                while (isCapturing && isActive) {
+                while (isCapturing && isActive && audioCaptureThread.isAlive) {
                     kotlinx.coroutines.delay(200)
+                }
+                if (isCapturing && isActive) {
+                    // The audio thread ended by itself (read error or exception): end this capture
+                    // the way Stop does, instead of staying "running" with no audio and a wake lock
+                    Log.w(TAG, "Audio thread ended unexpectedly; stopping capture")
+                    mainHandler.post {
+                        if (captureGeneration == generation && isCapturing) stopCapture()
+                    }
                 }
             } finally {
                 audioCaptureThread.interrupt()
@@ -814,10 +838,6 @@ class AudioCaptureService : Service() {
         isCapturing = false
         captureJob?.cancel()
         captureJob = null
-        recognitionForwardJob?.cancel()
-        recognitionForwardJob = null
-        translationPersistJob?.cancel()
-        translationPersistJob = null
 
         try {
             audioRecord?.stop()
@@ -837,6 +857,19 @@ class AudioCaptureService : Service() {
 
         // Release WakeLock
         releaseWakeLock()
+
+        // The floating window that Start opened closes with every kind of stop: the app's Stop,
+        // the notification, the tile, a failed start, or the audio ending by itself. Asked
+        // while still a foreground service, so the start is never refused as a background start.
+        if (isAutoOverlayEnabled && com.example.overlay.FloatingSubtitleService.isOverlayActive.value) {
+            try {
+                startService(Intent(this, com.example.overlay.FloatingSubtitleService::class.java).apply {
+                    action = com.example.overlay.FloatingSubtitleService.ACTION_STOP_OVERLAY
+                })
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not close the floating window: ${e.message}")
+            }
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)

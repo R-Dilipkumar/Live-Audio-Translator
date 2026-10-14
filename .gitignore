@@ -17,3 +17,12 @@ local.properties
 .env
 debug.keystore
 
+
+# Local notes and Claude Code files (kept on this computer only)
+CLAUDE.md
+CODE.md
+SESSION.md
+AUDIT.md
+AUDIT_PLAN.md
+Refactoring_plan.md
+.claude/

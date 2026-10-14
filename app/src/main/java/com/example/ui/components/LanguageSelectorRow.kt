@@ -86,7 +86,7 @@ fun LanguageSelectorRow(
                         .testTag("source_language_button")
                 ) {
                     Text(
-                        text = if (sourceLang.isAutoDetect && detectedLanguageHint != null) "Detected: $detectedLanguageHint" else "Source Audio",
+                        text = if (sourceLang.isAutoDetect && detectedLanguageHint != null) "Detected: $detectedLanguageHint" else "Spoken language",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (sourceLang.isAutoDetect && detectedLanguageHint != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         fontWeight = if (sourceLang.isAutoDetect) FontWeight.Bold else FontWeight.Normal
@@ -167,7 +167,7 @@ fun LanguageSelectorRow(
                     horizontalAlignment = Alignment.End
                 ) {
                     Text(
-                        text = "Translate To",
+                        text = "Subtitles in",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

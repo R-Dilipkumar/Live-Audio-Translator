@@ -27,11 +27,22 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
 /**
- * A streaming (live) Zipformer transducer model for Sherpa-ONNX.
+ * Speed: streaming models that show words while they are spoken.
+ * Accuracy: whole-phrase models that wait for the end of a phrase, then recognize it at once.
+ */
+enum class RecognitionMode { SPEED, ACCURACY }
+
+/** How an Accuracy-mode model is loaded (which sherpa-onnx offline model config it uses). */
+enum class OfflineFamily { SENSE_VOICE, WHISPER, MOONSHINE, TRANSDUCER }
+
+/**
+ * A speech recognition model for Sherpa-ONNX.
  *
  * totalSizeBytes is the exact archive size on the server (what the download shows).
- * The four file names match the files inside the archive. memoryMb is roughly the size of those
- * files, which is about what the model takes in RAM once loaded.
+ * The file names match the files inside the archive; a blank name means the model has no such
+ * file (SenseVoice is a single model file, Whisper and Moonshine have no joiner). For Moonshine,
+ * encoder/decoder are encoder_model.ort and decoder_model_merged.ort. memoryMb is roughly the
+ * size of the loaded files, which is about what the model takes in RAM.
  */
 data class AsrModelConfig(
     val id: String,
@@ -54,7 +65,12 @@ data class AsrModelConfig(
     val license: String = "Apache-2.0",
     // Sherpa-ONNX transducer type. Empty means sherpa-onnx reads the "model_type" entry from the
     // encoder's ONNX metadata, which every model here carries.
-    val modelType: String = ""
+    val modelType: String = "",
+    val mode: RecognitionMode = RecognitionMode.SPEED,
+    // Set for Accuracy-mode models
+    val offlineFamily: OfflineFamily? = null,
+    // Spoken-language codes the model can be locked to (SenseVoice, Whisper); empty if it can't
+    val languageHints: List<String> = emptyList()
 )
 
 sealed class ModelDownloadState {
@@ -218,7 +234,136 @@ class ModelManager(private val context: Context) {
             encoderFilename = "encoder.onnx",
             decoderFilename = "decoder.onnx",
             joinerFilename = "joiner.onnx"
+        ),
+        // ---- Accuracy mode: whole-phrase (offline) models ----
+        // The speech detector cuts audio into phrases; each phrase is recognized at once.
+        // Slower to appear than streaming, but much more accurate, with punctuation.
+        AsrModelConfig(
+            // The original 2024-07-17 release. Not the 2025-09-09 one: that was retrained on
+            // Cantonese, has no punctuation, and writes Japanese speech as Chinese characters.
+            // (New id, so an installed 2025 copy is removed as a retired model.)
+            id = "sensevoice",
+            name = "SenseVoice",
+            languageCode = "multi",
+            languages = listOf("Japanese", "Chinese", "English", "Korean", "Cantonese"),
+            description = "Alibaba SenseVoice Small. Very accurate for Japanese and Chinese, adds punctuation, tells languages apart by sound and ignores music and laughter. Best choice for anime and dramas. 2024.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+            totalSizeBytes = 163_002_883L,
+            memoryMb = 240,
+            encoderFilename = "model.int8.onnx",
+            decoderFilename = "",
+            joinerFilename = "",
+            isMultilingual = true,
+            hasPunctuation = true,
+            license = "FunASR model license",
+            mode = RecognitionMode.ACCURACY,
+            offlineFamily = OfflineFamily.SENSE_VOICE,
+            languageHints = listOf("ja", "zh", "en", "ko")
+        ),
+        moonshine("ja", "Japanese", 104_162_109L, 140),
+        moonshine("en", "English", 111_266_225L, 140),
+        moonshine("zh", "Chinese", 99_905_420L, 140),
+        moonshine("es", "Spanish", 50_846_902L, 65),
+        moonshine("ar", "Arabic", 119_143_068L, 140),
+        moonshine("vi", "Vietnamese", 106_719_129L, 140),
+        moonshine("uk", "Ukrainian", 111_037_143L, 140),
+        moonshine("ko", "Korean", 49_153_415L, 71, size = "tiny"),
+        AsrModelConfig(
+            id = "parakeet_v3",
+            name = "Parakeet v3 (European)",
+            languageCode = "multi",
+            languages = listOf("English", "Spanish", "French", "German", "Italian", "Portuguese", "Russian", "Ukrainian", "Polish", "Dutch", "and 15 more"),
+            description = "NVIDIA Parakeet TDT 0.6B v3. Top accuracy for 25 European languages, with punctuation and capitals. Large: needs a recent phone. 2025.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+            totalSizeBytes = 487_170_055L,
+            memoryMb = 670,
+            encoderFilename = "encoder.int8.onnx",
+            decoderFilename = "decoder.int8.onnx",
+            joinerFilename = "joiner.int8.onnx",
+            isMultilingual = true,
+            hasPunctuation = true,
+            license = "CC-BY-4.0",
+            modelType = "nemo_transducer",
+            mode = RecognitionMode.ACCURACY,
+            offlineFamily = OfflineFamily.TRANSDUCER
+        ),
+        AsrModelConfig(
+            id = "gigaam_ru",
+            name = "GigaAM v3 (Russian)",
+            languageCode = "ru",
+            languages = listOf("Russian"),
+            description = "Sber GigaAM v3 with punctuation. The most accurate open Russian model. 2025.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16.tar.bz2",
+            totalSizeBytes = 170_197_019L,
+            memoryMb = 232,
+            encoderFilename = "encoder.int8.onnx",
+            decoderFilename = "decoder.onnx",
+            joinerFilename = "joiner.onnx",
+            hasPunctuation = true,
+            license = "MIT",
+            modelType = "nemo_transducer",
+            mode = RecognitionMode.ACCURACY,
+            offlineFamily = OfflineFamily.TRANSDUCER
+        ),
+        AsrModelConfig(
+            id = "whisper_base",
+            name = "Whisper Base",
+            languageCode = "multi",
+            languages = listOf("99 languages, incl. Hindi, Tamil, Thai, Indonesian, Turkish"),
+            description = "OpenAI Whisper Base. Covers almost any language, with punctuation. Pick the spoken language for best results. Can invent text during music. 2022.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-whisper-base.tar.bz2",
+            totalSizeBytes = 207_557_382L,
+            memoryMb = 160,
+            encoderFilename = "base-encoder.int8.onnx",
+            decoderFilename = "base-decoder.int8.onnx",
+            joinerFilename = "",
+            tokensFilename = "base-tokens.txt",
+            isMultilingual = true,
+            hasPunctuation = true,
+            license = "MIT",
+            mode = RecognitionMode.ACCURACY,
+            offlineFamily = OfflineFamily.WHISPER,
+            languageHints = WHISPER_ANY_LANGUAGE
+        ),
+        AsrModelConfig(
+            id = "whisper_small",
+            name = "Whisper Small",
+            languageCode = "multi",
+            languages = listOf("99 languages"),
+            description = "OpenAI Whisper Small. More accurate than Base for most languages, but about three times slower. For recent phones. 2022.",
+            downloadUrl = "$RELEASE_URL/sherpa-onnx-whisper-small.tar.bz2",
+            totalSizeBytes = 639_387_718L,
+            memoryMb = 375,
+            encoderFilename = "small-encoder.int8.onnx",
+            decoderFilename = "small-decoder.int8.onnx",
+            joinerFilename = "",
+            tokensFilename = "small-tokens.txt",
+            isMultilingual = true,
+            hasPunctuation = true,
+            license = "MIT",
+            mode = RecognitionMode.ACCURACY,
+            offlineFamily = OfflineFamily.WHISPER,
+            languageHints = WHISPER_ANY_LANGUAGE
         )
+    )
+
+    /** Useful Moonshine v2 (2026) single-language models: same file layout for every language. */
+    private fun moonshine(code: String, language: String, archiveBytes: Long, memoryMb: Int, size: String = "base") = AsrModelConfig(
+        id = "moonshine_$code",
+        name = "Moonshine ($language)",
+        languageCode = code,
+        languages = listOf(language),
+        description = "Useful Sensors Moonshine v2 $size, trained only on $language. Small and quick, with punctuation. 2026.",
+        downloadUrl = "$RELEASE_URL/sherpa-onnx-moonshine-$size-$code-quantized-2026-02-27.tar.bz2",
+        totalSizeBytes = archiveBytes,
+        memoryMb = memoryMb,
+        encoderFilename = "encoder_model.ort",
+        decoderFilename = "decoder_model_merged.ort",
+        joinerFilename = "",
+        hasPunctuation = true,
+        license = "Moonshine Community License",
+        mode = RecognitionMode.ACCURACY,
+        offlineFamily = OfflineFamily.MOONSHINE
     )
 
     companion object {
@@ -227,22 +372,85 @@ class ModelManager(private val context: Context) {
 
         // Default selection on a fresh install
         const val DEFAULT_MODEL_ID = "zipformer_multilingual_universal"
+        const val DEFAULT_ACCURATE_MODEL_ID = "sensevoice"
+
+        // Whisper can be locked to any language code it knows; this marker means "any"
+        val WHISPER_ANY_LANGUAGE = listOf("*")
+
+        // Silero speech detector used by Accuracy mode, stored in models/<VAD_DIR>/
+        const val VAD_DIR = "_vad"
+        const val VAD_FILENAME = "silero_vad.onnx"
+        const val VAD_URL = "$RELEASE_URL/silero_vad.onnx"
+        const val VAD_SIZE_BYTES = 643_854L
 
         // Old storage layout: one flat folder shared by every model. Only read by the migration.
         const val LEGACY_FLAT_DIR = "models/sherpa-onnx"
 
         private const val PREFS_NAME = "asr_model_prefs"
         private const val KEY_SELECTED_MODEL_ID = "selected_model_id"
+        private const val KEY_SELECTED_ACCURATE_MODEL_ID = "selected_accurate_model_id"
+        private const val KEY_MODE = "recognition_mode"
+        // Set while native code loads a model; still set on the next start means that load crashed the app
+        private const val KEY_LOADING_MODEL_ID = "loading_model_id"
+
+        // A model is unpacked into models/<id><STAGING_SUFFIX>/ and moved into place only when complete
+        const val STAGING_SUFFIX = ".installing"
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val selectionLock = Any()
 
-    private val _selectedModel = MutableStateFlow(
-        availableModels.firstOrNull { it.id == prefs.getString(KEY_SELECTED_MODEL_ID, null) }
-            ?: availableModels.first { it.id == DEFAULT_MODEL_ID }
+    // Speed or Accuracy. Each mode remembers its own selected model.
+    private val _mode = MutableStateFlow(
+        prefs.getString(KEY_MODE, null)?.let { saved -> RecognitionMode.entries.firstOrNull { it.name == saved } }
+            ?: RecognitionMode.SPEED
     )
+    val mode: StateFlow<RecognitionMode> = _mode.asStateFlow()
+
+    private fun selectionKey(mode: RecognitionMode) =
+        if (mode == RecognitionMode.SPEED) KEY_SELECTED_MODEL_ID else KEY_SELECTED_ACCURATE_MODEL_ID
+
+    private fun defaultModelId(mode: RecognitionMode) =
+        if (mode == RecognitionMode.SPEED) DEFAULT_MODEL_ID else DEFAULT_ACCURATE_MODEL_ID
+
+    /** The remembered model for [mode], or that mode's default. */
+    private fun savedSelection(mode: RecognitionMode): AsrModelConfig {
+        val saved = prefs.getString(selectionKey(mode), null)
+        return availableModels.firstOrNull { it.id == saved && it.mode == mode }
+            ?: availableModels.first { it.id == defaultModelId(mode) }
+    }
+
+    private val _selectedModel = MutableStateFlow(savedSelection(_mode.value))
     val selectedModel: StateFlow<AsrModelConfig> = _selectedModel.asStateFlow()
+
+    // The model each latency uses (its remembered choice, or its default), for both latencies
+    private val _chosenModelIds = MutableStateFlow(RecognitionMode.entries.associateWith { savedSelection(it).id })
+    val chosenModelIds: StateFlow<Map<RecognitionMode, String>> = _chosenModelIds.asStateFlow()
+
+    // The model of the latest download attempt, so a download error shows on that model
+    private val _lastDownloadId = MutableStateFlow<String?>(null)
+    val lastDownloadId: StateFlow<String?> = _lastDownloadId.asStateFlow()
+
+    private fun refreshChosenModelIds() {
+        _chosenModelIds.value = RecognitionMode.entries.associateWith { savedSelection(it).id }
+    }
+
+    /** Models offered for [mode]. */
+    fun modelsFor(mode: RecognitionMode): List<AsrModelConfig> = availableModels.filter { it.mode == mode }
+
+    /**
+     * Switches between Speed and Accuracy. The selection becomes the model last used in that
+     * mode (or its default); the speech engine loads it on the next initEngine().
+     */
+    fun setMode(mode: RecognitionMode) {
+        synchronized(selectionLock) {
+            if (_mode.value == mode) return
+            _mode.value = mode
+            prefs.edit().putString(KEY_MODE, mode.name).apply()
+            _selectedModel.value = savedSelection(mode)
+        }
+        checkCurrentModelStatus()
+    }
 
     private val _downloadState = MutableStateFlow<ModelDownloadState>(ModelDownloadState.NotDownloaded)
     val downloadState: StateFlow<ModelDownloadState> = _downloadState.asStateFlow()
@@ -270,13 +478,46 @@ class ModelManager(private val context: Context) {
         scope.launch {
             migrateLegacyFlatInstall()
             cleanupOrphanedTempFiles()
+            val damagedModel = removeModelThatCrashedOnLoad()
             val ready = refreshReadyModels()
             // Free space taken by files of earlier installs that are never loaded
             availableModels.filter { it.id in ready }.forEach { pruneUnusedFiles(it) }
             refreshAvailableStorage()
             chooseInitialSelectionIfUnset(ready)
+            if (damagedModel != null && damagedModel.id == _selectedModel.value.id) {
+                _downloadState.value = ModelDownloadState.Error(damagedModelMessage(damagedModel))
+            }
             _hasScannedModels.value = true
         }
+    }
+
+    // ---- Crash guard for native model loading ----
+    // A damaged model file makes the native loader abort the whole app; that can't be caught.
+    // So the model id is saved before loading and cleared after. If it is still saved on the
+    // next start, that model crashed the app: it is removed instead of crashing on every start.
+
+    /** Call right before native code loads [modelId]. Saved synchronously so it survives a crash. */
+    fun beginNativeLoad(modelId: String) {
+        prefs.edit().putString(KEY_LOADING_MODEL_ID, modelId).commit()
+    }
+
+    /** Call after the native load returned, whether it worked or threw. */
+    fun endNativeLoad() {
+        prefs.edit().remove(KEY_LOADING_MODEL_ID).commit()
+    }
+
+    private fun damagedModelMessage(model: AsrModelConfig) =
+        "${model.name} could not be loaded (its files were damaged), so it was removed. Download it again in Models."
+
+    /** Removes the model whose load crashed the app last time, if any. Returns it. */
+    internal fun removeModelThatCrashedOnLoad(): AsrModelConfig? {
+        val crashedId = prefs.getString(KEY_LOADING_MODEL_ID, null) ?: return null
+        prefs.edit().remove(KEY_LOADING_MODEL_ID).commit()
+        val model = availableModels.firstOrNull { it.id == crashedId } ?: return null
+        Log.e(TAG, "Loading ${model.id} crashed the app last time; removing its files")
+        getModelDirectory(model).deleteRecursively()
+        NotificationHelper.showErrorNotification(context, "Model removed", damagedModelMessage(model))
+        return model
     }
 
     /**
@@ -295,10 +536,14 @@ class ModelManager(private val context: Context) {
                     Log.i(TAG, "Deleting legacy flat model folder (retired model)")
                     legacyDir.deleteRecursively()
                 }
-                val knownIds = availableModels.map { it.id }.toSet()
+                val knownIds = availableModels.map { it.id }.toSet() + VAD_DIR
                 getModelsDirectory().listFiles()?.forEach { dir ->
                     if (dir.isDirectory && dir.name !in knownIds) {
-                        Log.i(TAG, "Deleting retired model folder ${dir.name}")
+                        if (dir.name.endsWith(STAGING_SUFFIX)) {
+                            Log.i(TAG, "Deleting unfinished install ${dir.name}")
+                        } else {
+                            Log.i(TAG, "Deleting retired model folder ${dir.name}")
+                        }
                         dir.deleteRecursively()
                     }
                 }
@@ -316,13 +561,29 @@ class ModelManager(private val context: Context) {
      */
     private fun chooseInitialSelectionIfUnset(ready: Set<String>) {
         synchronized(selectionLock) {
-            val saved = prefs.getString(KEY_SELECTED_MODEL_ID, null)
-            if (saved != null && availableModels.any { it.id == saved }) return
-            val pick = availableModels.firstOrNull { it.id == DEFAULT_MODEL_ID && it.id in ready }
-                ?: availableModels.firstOrNull { it.id in ready }
+            val mode = _mode.value
+            val saved = prefs.getString(selectionKey(mode), null)
+            if (saved != null && availableModels.any { it.id == saved && it.mode == mode }) return
+            val pick = availableModels.firstOrNull { it.id == defaultModelId(mode) && it.id in ready }
+                ?: availableModels.firstOrNull { it.mode == mode && it.id in ready }
                 ?: return
             _selectedModel.value = pick
-            prefs.edit().putString(KEY_SELECTED_MODEL_ID, pick.id).apply()
+            prefs.edit().putString(selectionKey(mode), pick.id).apply()
+            refreshChosenModelIds()
+        }
+        checkCurrentModelStatus()
+    }
+
+    /**
+     * After [model] is downloaded: if its latency has no installed model yet, [model] becomes
+     * that latency's model. The latency itself never changes here; downloading is not choosing.
+     */
+    private fun adoptIfLatencyHasNoInstalledModel(model: AsrModelConfig, ready: Set<String>) {
+        synchronized(selectionLock) {
+            if (savedSelection(model.mode).id in ready && savedSelection(model.mode).id != model.id) return
+            prefs.edit().putString(selectionKey(model.mode), model.id).apply()
+            if (_mode.value == model.mode) _selectedModel.value = model
+            refreshChosenModelIds()
         }
         checkCurrentModelStatus()
     }
@@ -399,8 +660,14 @@ class ModelManager(private val context: Context) {
      */
     fun selectModel(model: AsrModelConfig) {
         synchronized(selectionLock) {
+            // Picking a model of the other kind also switches Speed/Accuracy
+            if (model.mode != _mode.value) {
+                _mode.value = model.mode
+                prefs.edit().putString(KEY_MODE, model.mode.name).apply()
+            }
             _selectedModel.value = model
-            prefs.edit().putString(KEY_SELECTED_MODEL_ID, model.id).apply()
+            prefs.edit().putString(selectionKey(model.mode), model.id).apply()
+            refreshChosenModelIds()
         }
         checkCurrentModelStatus()
     }
@@ -426,10 +693,14 @@ class ModelManager(private val context: Context) {
      */
     data class ResolvedModelFiles(
         val model: AsrModelConfig,
+        // The main model file (SenseVoice: the only one)
         val encoderFile: File,
-        val decoderFile: File,
-        val joinerFile: File,
-        val tokensFile: File
+        // Null when the model has no such file
+        val decoderFile: File?,
+        val joinerFile: File?,
+        val tokensFile: File,
+        // Speech detector, for Accuracy-mode models
+        val vadFile: File? = null
     )
 
     /**
@@ -465,24 +736,55 @@ class ModelManager(private val context: Context) {
         return resolveFilesInModelDir(model)
     }
 
-    private fun resolveFilesInModelDir(model: AsrModelConfig): ResolvedModelFiles? {
-        val dir = getModelDirectory(model)
-        if (dir.exists() && dir.isDirectory) {
-            val encoder = findFileInDir(dir, model.encoderFilename) ?: findOnnxByKeyword(dir, "encoder")
-            val decoder = findFileInDir(dir, model.decoderFilename) ?: findOnnxByKeyword(dir, "decoder")
-            val joiner = findFileInDir(dir, model.joinerFilename) ?: findOnnxByKeyword(dir, "joiner")
-            val tokens = findFileInDir(dir, model.tokensFilename) ?: findFileByKeyword(dir, "tokens.txt")
+    private fun resolveFilesInModelDir(model: AsrModelConfig, dir: File = getModelDirectory(model)): ResolvedModelFiles? {
+        if (!dir.exists() || !dir.isDirectory) return null
 
-            if (encoder != null && decoder != null && joiner != null && tokens != null &&
-                hasUsableModelFile(encoder, 1_000_000L) &&
-                hasUsableModelFile(decoder, 100_000L) &&
-                hasUsableModelFile(joiner, 10_000L) &&
-                hasUsableModelFile(tokens, 10L)
-            ) {
-                return ResolvedModelFiles(model, encoder, decoder, joiner, tokens)
+        val encoder = findFileInDir(dir, model.encoderFilename) ?: findOnnxByKeyword(dir, "encoder")
+        val tokens = findFileInDir(dir, model.tokensFilename) ?: findFileByKeyword(dir, "tokens.txt")
+        if (!hasUsableModelFile(encoder, 1_000_000L) || !hasUsableModelFile(tokens, 10L)) return null
+
+        // Files a model doesn't have (blank name) are skipped; files it has must be complete
+        val decoder = if (model.decoderFilename.isBlank()) null
+            else (findFileInDir(dir, model.decoderFilename) ?: findOnnxByKeyword(dir, "decoder"))
+                ?.takeIf { hasUsableModelFile(it, 100_000L) } ?: return null
+        val joiner = if (model.joinerFilename.isBlank()) null
+            else (findFileInDir(dir, model.joinerFilename) ?: findOnnxByKeyword(dir, "joiner"))
+                ?.takeIf { hasUsableModelFile(it, 10_000L) } ?: return null
+
+        // Accuracy-mode models also need the speech detector
+        val vad = if (model.mode == RecognitionMode.ACCURACY) vadModelFile().takeIf { isVadInstalled() } ?: return null else null
+        return ResolvedModelFiles(model, encoder!!, decoder, joiner, tokens!!, vad)
+    }
+
+    // ---- Speech detector (Silero VAD) for Accuracy mode ----
+
+    fun vadModelFile(): File = File(File(getModelsDirectory(), VAD_DIR), VAD_FILENAME)
+
+    fun isVadInstalled(): Boolean = hasUsableModelFile(vadModelFile(), 100_000L)
+
+    /** Downloads the small speech detector model if it is missing. Throws on failure. */
+    private fun ensureVadInstalled() {
+        if (isVadInstalled()) return
+        requireHttpsUrl(VAD_URL)
+        val target = vadModelFile()
+        target.parentFile?.mkdirs()
+        val temp = File(target.parentFile, "$VAD_FILENAME.download")
+        val request = Request.Builder().url(VAD_URL).build()
+        try {
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("Speech detector download failed (HTTP ${response.code})")
+                val body = response.body ?: throw IOException("Empty response body")
+                body.byteStream().use { input -> FileOutputStream(temp).use { output -> input.copyTo(output) } }
             }
+            // rename() replaces an old target file in one step on Android
+            if (temp.length() < 100_000L || !temp.renameTo(target)) {
+                throw IOException("Speech detector download is incomplete")
+            }
+        } finally {
+            // A download cut off part-way leaves no partial file behind
+            if (temp.exists()) temp.delete()
         }
-        return null
+        Log.i(TAG, "Speech detector installed (${target.length()} bytes)")
     }
 
     /**
@@ -497,15 +799,16 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * Deletes everything in the model's folder except the four files that are loaded
-     * (archives also ship other precision variants, test audio and scripts).
+     * Deletes everything in the model's folder except the files that are loaded and the safe
+     * token list (see JniSafeTokens). Archives also ship other precision variants, test audio
+     * and scripts.
      */
-    fun pruneUnusedFiles(model: AsrModelConfig) {
-        val resolved = resolveFilesInModelDir(model) ?: return
-        val keep = listOf(resolved.encoderFile, resolved.decoderFile, resolved.joinerFile, resolved.tokensFile)
+    fun pruneUnusedFiles(model: AsrModelConfig, dir: File = getModelDirectory(model)) {
+        val resolved = resolveFilesInModelDir(model, dir) ?: return
+        val safeTokens = File(resolved.tokensFile.parentFile, JniSafeTokens.SAFE_TOKENS_FILENAME)
+        val keep = listOfNotNull(resolved.encoderFile, resolved.decoderFile, resolved.joinerFile, resolved.tokensFile, safeTokens)
             .map { it.canonicalPath }
             .toSet()
-        val dir = getModelDirectory(model)
         var freed = 0L
         dir.walkBottomUp().forEach { file ->
             if (file == dir) return@forEach
@@ -547,9 +850,13 @@ class ModelManager(private val context: Context) {
                 return@withContext
             }
             _activeDownloadId.value = model.id
+            _lastDownloadId.value = model.id
         }
         val targetDir = getModelDirectory(model)
         val tempArchiveFile = File(getModelsDirectory(), "${model.id}_temp.archive")
+        // Unpacked here first, so a half-unpacked model is never seen as installed (loading one
+        // crashes the native loader)
+        val stagingDir = File(getModelsDirectory(), "${model.id}$STAGING_SUFFIX")
 
         fun report(state: ModelDownloadState) {
             _downloadState.value = state
@@ -569,6 +876,8 @@ class ModelManager(private val context: Context) {
 
             requireHttpsUrl(model.downloadUrl)
             report(ModelDownloadState.Downloading(0, model.totalSizeBytes, 0f))
+            // Accuracy-mode models need the speech detector (under 1 MB) to find phrases
+            if (model.mode == RecognitionMode.ACCURACY) ensureVadInstalled()
 
             val request = Request.Builder()
                 .url(model.downloadUrl)
@@ -612,10 +921,10 @@ class ModelManager(private val context: Context) {
 
             // Extract the downloaded model
             report(ModelDownloadState.Extracting("Preparing model directory...", 0.05f))
-            if (targetDir.exists()) {
-                targetDir.deleteRecursively()
+            if (stagingDir.exists()) {
+                stagingDir.deleteRecursively()
             }
-            targetDir.mkdirs()
+            stagingDir.mkdirs()
 
             val progressCallback: (String, Float) -> Unit = { entryName, prog ->
                 report(ModelDownloadState.Extracting(entryName, prog))
@@ -625,22 +934,28 @@ class ModelManager(private val context: Context) {
             val isZip = isZipFile(tempArchiveFile)
             val isBz2 = isBzip2File(tempArchiveFile) || model.downloadUrl.endsWith(".tar.bz2") || model.downloadUrl.endsWith(".bz2")
             if (isZip) {
-                unzip(tempArchiveFile, targetDir, progressCallback)
+                unzip(tempArchiveFile, stagingDir, progressCallback)
             } else if (isBz2) {
-                extractTarBz2(tempArchiveFile, targetDir, progressCallback)
+                extractTarBz2(tempArchiveFile, stagingDir, progressCallback)
             } else {
                 // For direct file or custom archive, move to target
-                val extractedFile = File(targetDir, model.encoderFilename)
+                val extractedFile = File(stagingDir, model.encoderFilename)
                 tempArchiveFile.copyTo(extractedFile, overwrite = true)
             }
 
             tempArchiveFile.delete()
 
-            // Verify installation
-            if (checkModelFilesOnDisk(model)) {
-                pruneUnusedFiles(model)
+            // Verify installation, then move the complete model into place in one step
+            if (resolveFilesInModelDir(model, stagingDir) != null) {
+                pruneUnusedFiles(model, stagingDir)
+                if (targetDir.exists()) {
+                    targetDir.deleteRecursively()
+                }
+                if (!stagingDir.renameTo(targetDir)) {
+                    throw IOException("Could not move the unpacked model into place")
+                }
                 report(ModelDownloadState.Ready(targetDir))
-                refreshReadyModels()
+                adoptIfLatencyHasNoInstalledModel(model, refreshReadyModels())
                 refreshAvailableStorage()
             } else {
                 // BUG 4 FIX: Do NOT write zero-byte placeholder ONNX files. If the archive
@@ -648,7 +963,7 @@ class ModelManager(private val context: Context) {
                 // is incompatible or corrupt. Delete the partial directory and report a hard error.
                 // Writing placeholder bytes causes a silent crash in the Sherpa-ONNX JNI native loader.
                 Log.e(TAG, "Model extraction succeeded but required files are missing. Cleaning up.")
-                cleanupPartialFiles(null, targetDir, model)
+                stagingDir.deleteRecursively()
                 val error = "Model archive did not contain expected ONNX files. Please retry the download."
                 report(ModelDownloadState.Error(error))
                 NotificationHelper.showErrorNotification(context, "Model Extraction Failed", error)
@@ -669,6 +984,9 @@ class ModelManager(private val context: Context) {
             if (tempArchiveFile.exists()) {
                 tempArchiveFile.delete()
             }
+            if (stagingDir.exists()) {
+                stagingDir.deleteRecursively()
+            }
             _activeDownloadId.value = null
         }
     }
@@ -683,8 +1001,16 @@ class ModelManager(private val context: Context) {
         val dir = getModelDirectory(model)
         val success = if (dir.exists()) dir.deleteRecursively() else true
         val ready = refreshReadyModels()
-        if (_selectedModel.value.id == model.id) {
-            availableModels.firstOrNull { it.id in ready }?.let { selectModel(it) }
+        // If this was the model kept for its latency (current or not), keep another installed
+        // model of that latency instead. The latency itself is not changed.
+        synchronized(selectionLock) {
+            if (savedSelection(model.mode).id == model.id) {
+                availableModels.firstOrNull { it.mode == model.mode && it.id in ready }?.let { fallback ->
+                    prefs.edit().putString(selectionKey(model.mode), fallback.id).apply()
+                    if (_mode.value == model.mode) _selectedModel.value = fallback
+                }
+                refreshChosenModelIds()
+            }
         }
         refreshAvailableStorage()
         checkCurrentModelStatus()

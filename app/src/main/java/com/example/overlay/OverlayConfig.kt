@@ -54,7 +54,23 @@ enum class OverlayTheme(
     )
 }
 
-// All fields are vals of stable types; marking it lets Compose skip DraggableSubtitleBox when unchanged
+/**
+ * How subtitles are presented (the three standard caption styles):
+ * - MOVIE (pop-on): a card fills the box, holds for reading, then is replaced.
+ * - ROLL_UP: sentences stack, newest at the bottom; older lines roll up and fade. Can be
+ *   scrolled back. The usual style for live TV and fast speech.
+ * - LIVE (paint-on): the current sentence is rewritten in place as words arrive.
+ * [code] is what is stored in settings.
+ */
+enum class SubtitleStyle(val code: Int) {
+    MOVIE(0), ROLL_UP(1), LIVE(2);
+
+    companion object {
+        fun fromCode(code: Int): SubtitleStyle = entries.firstOrNull { it.code == code } ?: ROLL_UP
+    }
+}
+
+// All fields are vals of stable types; marking it lets Compose skip SubtitleOverlay when unchanged
 @Immutable
 data class OverlaySettings(
     val theme: OverlayTheme = OverlayTheme.CINEMA_DARK,
@@ -64,9 +80,14 @@ data class OverlaySettings(
     val isCollapsed: Boolean = false,
     val isPaused: Boolean = false,
     val isLocked: Boolean = false,
-    val maxSubtitleLines: Int = 2, // 1, 2, or 3 visible lines
+    val maxSubtitleLines: Int = 2, // 1 to 4 visible lines
     val maxLines: Int = maxSubtitleLines, // Backwards compatibility alias
     val lingerTimeSeconds: Float = 3.5f, // 1.0s to 10.0s, or 0f for 'Keep on Screen'
     val isTextOutlineShadowEnabled: Boolean = true,
-    val textShadowRadius: Float = 3.0f
+    val textShadowRadius: Float = 3.0f,
+    val style: SubtitleStyle = SubtitleStyle.ROLL_UP,
+    // Window width chosen by resizing, in dp; 0 = automatic
+    val widthDp: Int = 0,
+    // Accuracy recognition mode: subtitles arrive per phrase and stay up longer
+    val isAccuracyMode: Boolean = false
 )

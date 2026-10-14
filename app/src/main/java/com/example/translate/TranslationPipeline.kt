@@ -29,7 +29,9 @@ enum class TranslationStatus(val isTranslation: Boolean) {
 data class TranslationRequest(
     val text: String,
     val isFinal: Boolean,
-    val utteranceId: Long
+    val utteranceId: Long,
+    // Language the speech model heard (from the sound), or null
+    val languageHint: String? = null
 )
 
 /**
@@ -145,6 +147,11 @@ class LanguageDetectionGate {
     @Volatile var lastConfidentLanguage: String? = null
         private set
 
+    /** Remembers [code] as the current language (e.g. one heard by the speech model). */
+    fun remember(code: String) {
+        lastConfidentLanguage = code
+    }
+
     fun resolve(candidates: List<Pair<String, Float>>, confidenceThreshold: Float): String? {
         val best = candidates.maxByOrNull { it.second }
         if (best != null && best.second >= confidenceThreshold) {
@@ -152,6 +159,70 @@ class LanguageDetectionGate {
             return best.first
         }
         return lastConfidentLanguage
+    }
+
+    /**
+     * Like [resolve], but only languages for which [isUsable] is true (pack downloaded, or the
+     * target language) can be chosen or remembered.
+     *
+     * A line that is confidently in an unusable language:
+     * - uses the remembered language if [text] is written in that language's script. The
+     *   recognizer often writes misheard Japanese with Chinese characters (ありがとう as 谢谢);
+     *   such lines are translated as Japanese instead of being skipped.
+     * - otherwise returns the unusable language for this line only, so it is reported as missing
+     *   and not shown. Music and noise read as Chinese during English speech end up here.
+     * The remembered language is never replaced by an unusable one.
+     */
+    fun resolveAmong(
+        candidates: List<Pair<String, Float>>,
+        confidenceThreshold: Float,
+        text: String,
+        isUsable: (String) -> Boolean
+    ): String? {
+        val usable = candidates.filter { isUsable(it.first) }
+        val bestUsable = usable.maxByOrNull { it.second }
+        if (bestUsable == null || bestUsable.second < confidenceThreshold) {
+            val bestOverall = candidates.maxByOrNull { it.second }
+            if (bestOverall != null && bestOverall.second >= confidenceThreshold && !isUsable(bestOverall.first)) {
+                val remembered = lastConfidentLanguage
+                if (remembered != null && isUsable(remembered) && writingSystemOf(text) == writingSystemOfLanguage(remembered)) {
+                    return remembered
+                }
+                return bestOverall.first
+            }
+        }
+        return resolve(usable, confidenceThreshold)
+    }
+
+    private fun writingSystemOf(text: String): String? =
+        text.filter { it.isLetter() }
+            .groupingBy { writingSystemOfChar(it) }
+            .eachCount()
+            .filterKeys { it != null }
+            .maxByOrNull { it.value }
+            ?.key
+
+    private fun writingSystemOfChar(c: Char): String? = when (Character.UnicodeScript.of(c.code)) {
+        Character.UnicodeScript.HAN,
+        Character.UnicodeScript.HIRAGANA,
+        Character.UnicodeScript.KATAKANA -> "cjk"
+        Character.UnicodeScript.HANGUL -> "hangul"
+        Character.UnicodeScript.CYRILLIC -> "cyrillic"
+        Character.UnicodeScript.ARABIC -> "arabic"
+        Character.UnicodeScript.DEVANAGARI -> "devanagari"
+        Character.UnicodeScript.THAI -> "thai"
+        Character.UnicodeScript.LATIN -> "latin"
+        else -> null
+    }
+
+    private fun writingSystemOfLanguage(code: String): String = when (code) {
+        "ja", "zh" -> "cjk"
+        "ko" -> "hangul"
+        "ru", "uk", "bg", "be" -> "cyrillic"
+        "ar", "fa", "ur" -> "arabic"
+        "hi", "mr", "ne" -> "devanagari"
+        "th" -> "thai"
+        else -> "latin"
     }
 
     fun reset() {

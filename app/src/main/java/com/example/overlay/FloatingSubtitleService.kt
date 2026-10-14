@@ -30,12 +30,13 @@ import com.example.asr.SpeechValidator
 import com.example.data.SettingsRepository
 import com.example.service.AudioCaptureService
 import com.example.translate.SubtitleOrderGate
-import com.example.ui.components.DraggableSubtitleBox
+import com.example.ui.components.SubtitleOverlay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -80,10 +81,10 @@ class FloatingSubtitleService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
     private var translationCollectJob: Job? = null
     private var partialCollectJob: Job? = null
-    private var drmCollectJob: Job? = null
     // BUG 13 FIX: Track the settings observer job so it can be cancelled before re-launching,
     // preventing multiple settings collectors from accumulating on each showOverlay() call.
     private var settingsCollectJob: Job? = null
+    private var modeCollectJob: Job? = null
 
     // Only results for the same or a newer utterance are shown, and a partial never
     // replaces the final of the same utterance (late partial translations are ignored).
@@ -105,12 +106,12 @@ class FloatingSubtitleService : Service() {
     private val _floatingPartialText = MutableStateFlow("")
     val floatingPartialText: StateFlow<String> = _floatingPartialText.asStateFlow()
 
-    private val _floatingDrmSilence = MutableStateFlow(false)
-    val floatingDrmSilence: StateFlow<Boolean> = _floatingDrmSilence.asStateFlow()
-
     companion object {
         const val ACTION_START_OVERLAY = "com.example.action.START_OVERLAY"
         const val ACTION_STOP_OVERLAY = "com.example.action.STOP_OVERLAY"
+
+        // Narrowest the window can be resized to
+        private const val MIN_WINDOW_WIDTH_DP = 180
 
         private val _isOverlayActive = MutableStateFlow(false)
         val isOverlayActive: StateFlow<Boolean> = _isOverlayActive.asStateFlow()
@@ -121,6 +122,11 @@ class FloatingSubtitleService : Service() {
         fun updateSettings(newSettings: OverlaySettings) {
             _currentSettings.value = newSettings
         }
+
+        // Settings saves outlive the window, so a change made just before closing is still saved
+        private val settingsSaveScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        private var settingsSaveJob: Job? = null
+        private const val SETTINGS_SAVE_DELAY_MS = 300L
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -169,10 +175,7 @@ class FloatingSubtitleService : Service() {
         val screenW = displayMetrics.widthPixels
         val screenH = displayMetrics.heightPixels
 
-        val maxBoxW = (screenW * 0.90f).toInt().coerceAtMost(dpToPx(520))
-        if (params.width > maxBoxW) {
-            params.width = maxBoxW
-        }
+        params.width = clampWidth(params.width)
 
         val viewW = if (view.width > 0) view.width else params.width
         val viewH = if (view.height > 0) view.height else dpToPx(140)
@@ -204,8 +207,8 @@ class FloatingSubtitleService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        val displayMetrics = resources.displayMetrics
-        val initialWidth = (displayMetrics.widthPixels * 0.92f).toInt().coerceAtMost(dpToPx(440))
+        val savedWidthDp = _currentSettings.value.widthDp
+        val initialWidth = if (savedWidthDp > 0) clampWidth(dpToPx(savedWidthDp)) else defaultWindowWidth()
 
         val params = WindowManager.LayoutParams(
             initialWidth,
@@ -244,34 +247,35 @@ class FloatingSubtitleService : Service() {
             val utteranceId by floatingUtteranceId.collectAsStateWithLifecycle()
             val partialText by floatingPartialText.collectAsStateWithLifecycle()
             val settings by currentSettings.collectAsStateWithLifecycle()
-            val isDrm by floatingDrmSilence.collectAsStateWithLifecycle()
+            val isListening by AudioCaptureService.isServiceRunning.collectAsStateWithLifecycle()
 
-            DraggableSubtitleBox(
+            SubtitleOverlay(
                 originalText = originalText,
                 translatedText = translatedText,
                 isTranslatedFinal = isTranslatedFinal,
                 utteranceId = utteranceId,
                 partialText = partialText,
+                isListening = isListening,
                 settings = settings,
-                isDrmSilenceDetected = isDrm,
-                onSwitchToMic = {
-                    val micIntent = Intent(this@FloatingSubtitleService, AudioCaptureService::class.java).apply {
-                        action = AudioCaptureService.ACTION_SWITCH_TO_MIC
-                    }
-                    startService(micIntent)
-                },
                 onSettingsChanged = { newSettings ->
                     updateSettings(newSettings)
-                    serviceScope.launch {
+                    // A slider calls this on every drag frame: save once, shortly after the last
+                    // change, in a single write. Saving every frame queued many writes whose older
+                    // values flowed back into the window and made the slider jump back.
+                    settingsSaveJob?.cancel()
+                    settingsSaveJob = settingsSaveScope.launch {
+                        delay(SETTINGS_SAVE_DELAY_MS)
                         try {
-                            val repo = SettingsRepository(this@FloatingSubtitleService)
-                            repo.updateFontSize(newSettings.fontSizeSp)
-                            repo.updateOverlayOpacity(newSettings.opacity)
-                            repo.updateMaxDisplayLines(newSettings.maxSubtitleLines)
-                            repo.updateShowOriginalSpeech(newSettings.showOriginal)
-                            repo.updateSubtitleLingerTime(newSettings.lingerTimeSeconds)
-                            repo.updateTextOutlineShadow(newSettings.isTextOutlineShadowEnabled)
-                            repo.updateTextShadowRadius(newSettings.textShadowRadius)
+                            SettingsRepository(applicationContext).updateOverlaySettings(
+                                fontSizeSp = newSettings.fontSizeSp,
+                                opacity = newSettings.opacity,
+                                maxLines = newSettings.maxSubtitleLines,
+                                showOriginal = newSettings.showOriginal,
+                                lingerSeconds = newSettings.lingerTimeSeconds,
+                                textShadow = newSettings.isTextOutlineShadowEnabled,
+                                textShadowRadius = newSettings.textShadowRadius,
+                                styleCode = newSettings.style.code
+                            )
                         } catch (_: Exception) {}
                     }
                 },
@@ -283,47 +287,13 @@ class FloatingSubtitleService : Service() {
                     removeOverlay()
                     stopSelf()
                 },
-                onDragDelta = { dx, dy ->
-                    val p = layoutParams ?: return@DraggableSubtitleBox
-                    val w = windowManager ?: return@DraggableSubtitleBox
-                    val root = overlayRootView ?: return@DraggableSubtitleBox
-                    val metrics = resources.displayMetrics
-                    val screenW = metrics.widthPixels
-                    val screenH = metrics.heightPixels
-
-                    val viewW = root.width.takeIf { it > 0 } ?: dpToPx(340)
-                    val viewH = root.height.takeIf { it > 0 } ?: dpToPx(140)
-
-                    val minX = dpToPx(4)
-                    val maxX = (screenW - viewW - dpToPx(4)).coerceAtLeast(minX)
-                    val minY = dpToPx(28)
-                    val maxY = (screenH - viewH - dpToPx(48)).coerceAtLeast(minY)
-
-                    p.x = (p.x + dx.toInt()).coerceIn(minX, maxX)
-                    p.y = (p.y + dy.toInt()).coerceIn(minY, maxY)
-                    try {
-                        w.updateViewLayout(root, p)
-                    } catch (_: Exception) {}
-                },
-                onDragEnd = {
-                    val p = layoutParams ?: return@DraggableSubtitleBox
-                    val w = windowManager ?: return@DraggableSubtitleBox
-                    val root = overlayRootView ?: return@DraggableSubtitleBox
-                    val metrics = resources.displayMetrics
-                    val screenW = metrics.widthPixels
-                    val viewW = root.width.takeIf { it > 0 } ?: dpToPx(340)
-                    val minX = dpToPx(4)
-                    val maxX = (screenW - viewW - dpToPx(4)).coerceAtLeast(minX)
-
-                    val snapMargin = dpToPx(24)
-                    if (p.x < minX + snapMargin) {
-                        p.x = minX
-                    } else if (p.x > maxX - snapMargin) {
-                        p.x = maxX
-                    }
-                    try {
-                        w.updateViewLayout(root, p)
-                    } catch (_: Exception) {}
+                onMove = { dx, dy -> moveWindowBy(dx.toInt(), dy.toInt()) },
+                onMoveEnd = { snapWindowToEdges() },
+                onResizeWidth = { dx -> resizeWindowBy(dx.toInt()) },
+                onResizeEnd = { saveWindowWidth() },
+                onControlsVisibilityChanged = { visible, controlsHeightPx ->
+                    // Keep the subtitles at the same place on screen when the top bar hides or returns
+                    moveWindowBy(0, if (visible) -controlsHeightPx else controlsHeightPx)
                 }
             )
         }
@@ -364,14 +334,28 @@ class FloatingSubtitleService : Service() {
                         showOriginal = appSettings.showOriginalSpeech,
                         lingerTimeSeconds = appSettings.subtitleLingerTimeSeconds,
                         isTextOutlineShadowEnabled = appSettings.isTextOutlineShadowEnabled,
-                        textShadowRadius = appSettings.textShadowRadius
+                        textShadowRadius = appSettings.textShadowRadius,
+                        style = SubtitleStyle.fromCode(appSettings.subtitleStyle),
+                        widthDp = appSettings.overlayWidthDp
                     )
+                    // Apply a saved width (e.g. on first show), unless the user is resizing right now
+                    if (!isResizing && appSettings.overlayWidthDp > 0) {
+                        setWindowWidth(dpToPx(appSettings.overlayWidthDp))
+                    }
                 }
             } catch (_: Exception) {}
         }
 
+        modeCollectJob?.cancel()
+        modeCollectJob = serviceScope.launch {
+            AudioCaptureService.getModelManager(this@FloatingSubtitleService).mode.collect { mode ->
+                _currentSettings.value = _currentSettings.value.copy(isAccuracyMode = mode == com.example.asr.RecognitionMode.ACCURACY)
+            }
+        }
+
         // Immediately hydrate initial values from translator engine if available
-        translator.latestTranslation.value?.takeIf { subtitleOrderGate.accept(it) }?.let { initial ->
+        // Status results (pack missing, detecting language, failed) are not subtitles
+        translator.latestTranslation.value?.takeIf { it.status.isTranslation && subtitleOrderGate.accept(it) }?.let { initial ->
             if (SpeechValidator.isGenuineSpeech(initial.originalText) && speech.isConfirmedAsrEvent(initial.originalText)) {
                 _floatingOriginalText.value = initial.originalText
             }
@@ -386,7 +370,9 @@ class FloatingSubtitleService : Service() {
         translationCollectJob?.cancel()
         translationCollectJob = serviceScope.launch(Dispatchers.Main.immediate) {
             translator.translationFlow.collect { result ->
+                // Status messages (pack missing, detecting language, failed) are for the app, not subtitles
                 if (!_currentSettings.value.isPaused &&
+                    result.status.isTranslation &&
                     SpeechValidator.isGenuineSpeech(result.originalText) &&
                     SpeechValidator.isGenuineSpeech(result.translatedText) &&
                     subtitleOrderGate.accept(result)
@@ -407,13 +393,6 @@ class FloatingSubtitleService : Service() {
                 }
             }
         }
-
-        drmCollectJob?.cancel()
-        drmCollectJob = serviceScope.launch {
-            AudioCaptureService.isDrmSilenceDetected.collect { isDrm ->
-                _floatingDrmSilence.value = isDrm
-            }
-        }
     }
 
     private fun removeOverlay() {
@@ -432,6 +411,92 @@ class FloatingSubtitleService : Service() {
         }
     }
 
+    // ---- Window position and size ----
+
+    private var isResizing = false
+
+    private fun defaultWindowWidth(): Int =
+        (resources.displayMetrics.widthPixels * 0.92f).toInt().coerceAtMost(dpToPx(440))
+
+    private fun clampWidth(widthPx: Int): Int {
+        val maxW = resources.displayMetrics.widthPixels - dpToPx(8)
+        return widthPx.coerceIn(dpToPx(MIN_WINDOW_WIDTH_DP).coerceAtMost(maxW), maxW)
+    }
+
+    /** Moves the window, keeping it fully on screen. */
+    private fun moveWindowBy(dx: Int, dy: Int) {
+        val p = layoutParams ?: return
+        val w = windowManager ?: return
+        val root = overlayRootView ?: return
+        val metrics = resources.displayMetrics
+        val viewW = root.width.takeIf { it > 0 } ?: p.width
+        val viewH = root.height.takeIf { it > 0 } ?: dpToPx(120)
+        val minX = dpToPx(4)
+        val maxX = (metrics.widthPixels - viewW - dpToPx(4)).coerceAtLeast(minX)
+        val minY = dpToPx(24)
+        val maxY = (metrics.heightPixels - viewH - dpToPx(24)).coerceAtLeast(minY)
+        p.x = (p.x + dx).coerceIn(minX, maxX)
+        p.y = (p.y + dy).coerceIn(minY, maxY)
+        try {
+            w.updateViewLayout(root, p)
+        } catch (_: Exception) {}
+    }
+
+    /** After a drag, a window released close to a side edge sticks to it. */
+    private fun snapWindowToEdges() {
+        val p = layoutParams ?: return
+        val w = windowManager ?: return
+        val root = overlayRootView ?: return
+        val viewW = root.width.takeIf { it > 0 } ?: p.width
+        val minX = dpToPx(4)
+        val maxX = (resources.displayMetrics.widthPixels - viewW - dpToPx(4)).coerceAtLeast(minX)
+        val snapMargin = dpToPx(24)
+        p.x = when {
+            p.x < minX + snapMargin -> minX
+            p.x > maxX - snapMargin -> maxX
+            else -> p.x
+        }
+        try {
+            w.updateViewLayout(root, p)
+        } catch (_: Exception) {}
+    }
+
+    /** Resizing from the bottom-right corner: the left edge stays, the width follows the finger. */
+    private fun resizeWindowBy(dx: Int) {
+        val p = layoutParams ?: return
+        isResizing = true
+        val screenW = resources.displayMetrics.widthPixels
+        val maxForPosition = screenW - p.x - dpToPx(4)
+        setWindowWidth((p.width + dx).coerceAtMost(maxForPosition))
+    }
+
+    private fun setWindowWidth(widthPx: Int) {
+        val p = layoutParams ?: return
+        val w = windowManager ?: return
+        val root = overlayRootView ?: return
+        val newWidth = clampWidth(widthPx)
+        if (newWidth == p.width) return
+        p.width = newWidth
+        // Keep the right edge on screen
+        val maxX = (resources.displayMetrics.widthPixels - newWidth - dpToPx(4)).coerceAtLeast(dpToPx(4))
+        if (p.x > maxX) p.x = maxX
+        try {
+            w.updateViewLayout(root, p)
+        } catch (_: Exception) {}
+    }
+
+    private fun saveWindowWidth() {
+        isResizing = false
+        val widthPx = layoutParams?.width ?: return
+        val widthDp = (widthPx / resources.displayMetrics.density).toInt()
+        _currentSettings.value = _currentSettings.value.copy(widthDp = widthDp)
+        serviceScope.launch {
+            try {
+                SettingsRepository(this@FloatingSubtitleService).updateOverlayWidth(widthDp)
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun dpToPx(dp: Int): Int {
         val density = resources.displayMetrics.density
         return (dp * density).toInt()
@@ -440,8 +505,8 @@ class FloatingSubtitleService : Service() {
     override fun onDestroy() {
         translationCollectJob?.cancel()
         partialCollectJob?.cancel()
-        drmCollectJob?.cancel()
         settingsCollectJob?.cancel()
+        modeCollectJob?.cancel()
         serviceScope.cancel()
         removeOverlay()
         // BUG 5 FIX: Destroy the service-level lifecycle owner only when the service truly stops.

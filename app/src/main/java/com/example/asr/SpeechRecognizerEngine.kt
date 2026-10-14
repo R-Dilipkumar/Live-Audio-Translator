@@ -33,7 +33,8 @@ import java.util.concurrent.atomic.AtomicInteger
 
 sealed class AsrUtteranceEvent {
     data class Partial(val text: String, val utteranceId: Long = 0L, val timestamp: Long = System.currentTimeMillis()) : AsrUtteranceEvent()
-    data class Final(val text: String, val utteranceId: Long = 0L, val timestamp: Long = System.currentTimeMillis()) : AsrUtteranceEvent()
+    // language: two-letter code of the language the model heard (Accuracy mode), or null
+    data class Final(val text: String, val utteranceId: Long = 0L, val timestamp: Long = System.currentTimeMillis(), val language: String? = null) : AsrUtteranceEvent()
 }
 
 sealed class RecognizerState {
@@ -73,7 +74,16 @@ class SpeechRecognizerEngine(
 
     private var onlineRecognizer: OnlineRecognizer? = null
     private var onlineStream: OnlineStream? = null
+    // Accuracy mode: speech detector + whole-phrase model. Set instead of onlineRecognizer.
+    private var offlineRecognizer: OfflinePhraseRecognizer? = null
     private val recognizerLock = Any()
+
+    /**
+     * The language being listened to (two-letter code), or null for auto-detect. Accuracy-mode
+     * models that support it (SenseVoice, Whisper) are locked to it, which stops e.g. Japanese
+     * being heard as Chinese. Applied the next time the recognizer is built.
+     */
+    @Volatile var spokenLanguageHint: String? = null
 
     // Single-flight guard for initEngine(): only one build at a time.
     private val initMutex = Mutex()
@@ -109,6 +119,28 @@ class SpeechRecognizerEngine(
     // A one-character line waiting to be joined to the next sentence, and when it was heard
     private var pendingFragment: String? = null
     private var pendingFragmentTime = 0L
+
+    // Holds finished pieces until the sentence looks complete, so whole sentences are translated
+    private val sentenceAssembler = SentenceAssembler()
+    // Accuracy mode: phrases come with punctuation, so most complete at once; the waits only
+    // matter for a phrase cut at a comma or without punctuation
+    private val phraseAssembler = SentenceAssembler(pauseMs = 600L, continuationPauseMs = 1_200L)
+    // Language of the last recognized phrase (Accuracy mode)
+    private var lastPhraseLanguage: String? = null
+    var joinSentencePieces: Boolean
+        get() = sentenceAssembler.isEnabled
+        set(value) {
+            sentenceAssembler.isEnabled = value
+            phraseAssembler.isEnabled = value
+        }
+    // The recognizer's own text for the piece in progress (partialTextFlow also shows waiting pieces)
+    private var currentRawDraft = ""
+
+    // Drops text that is most likely music or noise before it is shown or translated
+    private val noiseTextFilter = NoiseTextFilter()
+    var filterNoiseText: Boolean
+        get() = noiseTextFilter.isEnabled
+        set(value) { noiseTextFilter.isEnabled = value }
     @Volatile var isAntiFreezeWatchdogEnabled: Boolean = true
 
     // Anti-freeze watchdog: time of the last partial change, final, or stream reset.
@@ -128,8 +160,10 @@ class SpeechRecognizerEngine(
         const val SINGLE_CHAR_JOIN_NEXT = 0
         const val SINGLE_CHAR_DROP = 1
         const val SINGLE_CHAR_KEEP = 2
-        // A held character is only joined if the next sentence starts within this time
-        const val PENDING_FRAGMENT_MAX_AGE_MS = 4_000L
+        // A held character is only joined if the next sentence starts within this time.
+        // Longer gaps glued stray mishearings onto unrelated lines and changed their meaning
+        // (e.g. "N" + "どこで乗りますか" became "N Where do you ride").
+        const val PENDING_FRAGMENT_MAX_AGE_MS = 1_200L
 
         /** Joins two pieces of recognized text: no space between CJK/Thai text, a space otherwise. */
         fun joinFragments(first: String, second: String): String {
@@ -166,7 +200,9 @@ class SpeechRecognizerEngine(
         val silenceEndpointDelay: Float,
         val maxUtteranceWindow: Float,
         val noSpeechRestartDelay: Float,
-        val minSentenceLength: Float
+        val minSentenceLength: Float,
+        // Accuracy mode only: the spoken language the model is locked to (null = detect)
+        val languageHint: String? = null
     )
 
     // BUG 7 FIX: Use ArrayDeque instead of MutableList<Float>. The old subList(0, n).clear()
@@ -230,7 +266,9 @@ class SpeechRecognizerEngine(
      */
     suspend fun initEngine(): Boolean = withContext(Dispatchers.IO) {
         initMutex.withLock {
-            val hasRecognizer = synchronized(recognizerLock) { onlineRecognizer != null && onlineStream != null }
+            val hasRecognizer = synchronized(recognizerLock) {
+                (onlineRecognizer != null && onlineStream != null) || offlineRecognizer != null
+            }
 
             if (hasRecognizer && isCapturing) {
                 Log.d(TAG, "initEngine during capture: keeping the running recognizer (${loadedConfig?.modelId})")
@@ -247,7 +285,13 @@ class SpeechRecognizerEngine(
                 return@withLock false
             }
 
-            val wanted = LoadedConfig(resolved.modelId, silenceEndpointDelay, maxUtteranceWindow, noSpeechRestartDelay, minSentenceLength)
+            val isAccuracyModel = resolved.model.mode == RecognitionMode.ACCURACY
+            val wanted = if (isAccuracyModel) {
+                // Endpoint settings don't apply: the speech detector finds the phrases
+                LoadedConfig(resolved.modelId, 0f, 0f, 0f, 0f, languageHintFor(resolved.model))
+            } else {
+                LoadedConfig(resolved.modelId, silenceEndpointDelay, maxUtteranceWindow, noSpeechRestartDelay, minSentenceLength)
+            }
             if (hasRecognizer && loadedConfig == wanted) {
                 if (_engineState.value !is RecognizerState.Listening) {
                     _engineState.value = RecognizerState.Ready
@@ -256,12 +300,34 @@ class SpeechRecognizerEngine(
             }
 
             _engineState.value = RecognizerState.Initializing
+            if (isAccuracyModel) {
+                return@withLock try {
+                    val phraseRecognizer = loadNative(resolved.modelId) {
+                        OfflinePhraseRecognizer.create(resolved.model, resolved.files, wanted.languageHint)
+                    }
+                    synchronized(recognizerLock) {
+                        releaseRecognizersLocked()
+                        offlineRecognizer = phraseRecognizer
+                        loadedConfig = wanted
+                        resetUtteranceState()
+                    }
+                    _engineState.value = RecognizerState.Ready
+                    Log.i(TAG, "Accuracy-mode recognizer ready: model=${resolved.modelId} language=${wanted.languageHint ?: "auto"}")
+                    true
+                } catch (t: Throwable) {
+                    val error = "Failed to load ${resolved.model.name}: ${t.localizedMessage}"
+                    Log.e(TAG, error, t)
+                    _engineState.value = RecognizerState.Error(error)
+                    NotificationHelper.showErrorNotification(context, "ASR Engine Crash", error)
+                    false
+                }
+            }
             try {
                 val modelConfig = OnlineModelConfig(
                     transducer = OnlineTransducerModelConfig(
                         encoder = resolved.encoderFile.absolutePath,
-                        decoder = resolved.decoderFile.absolutePath,
-                        joiner = resolved.joinerFile.absolutePath
+                        decoder = resolved.decoderFile!!.absolutePath,
+                        joiner = resolved.joinerFile!!.absolutePath
                     ),
                     tokens = resolved.tokensFile.absolutePath,
                     numThreads = 2,
@@ -279,22 +345,15 @@ class SpeechRecognizerEngine(
                 )
 
                 // OnlineRecognizer(config) with absolute file paths rather than OnlineRecognizer(assetManager, config)
-                val recognizer = OnlineRecognizer(config = recognizerConfig)
+                val recognizer = loadNative(resolved.modelId) { OnlineRecognizer(config = recognizerConfig) }
                 val stream = recognizer.createStream()
 
                 synchronized(recognizerLock) {
-                    val oldStream = onlineStream
-                    val oldRecognizer = onlineRecognizer
+                    releaseRecognizersLocked()
                     onlineRecognizer = recognizer
                     onlineStream = stream
                     loadedConfig = wanted
                     resetUtteranceState()
-                    try {
-                        oldStream?.release()
-                        oldRecognizer?.release()
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "Error releasing previous recognizer", t)
-                    }
                 }
                 _engineState.value = RecognizerState.Ready
                 Log.i(TAG, "Sherpa-ONNX recognizer ready: model=${resolved.modelId} type='${resolved.modelType}' " +
@@ -308,6 +367,20 @@ class SpeechRecognizerEngine(
                 NotificationHelper.showErrorNotification(context, "ASR Engine Crash", error)
                 false
             }
+        }
+    }
+
+    /**
+     * Runs a native model load under ModelManager's crash guard: if a damaged file makes the
+     * native code abort the app, that model is removed on the next start instead of crashing
+     * again on every launch.
+     */
+    private inline fun <T> loadNative(modelId: String, load: () -> T): T {
+        modelManager.beginNativeLoad(modelId)
+        try {
+            return load()
+        } finally {
+            modelManager.endNativeLoad()
         }
     }
 
@@ -328,13 +401,26 @@ class SpeechRecognizerEngine(
     }
 
     data class LoadedModelFiles(
-        val modelId: String,
-        val modelType: String,
-        val encoderFile: File,
-        val decoderFile: File,
-        val joinerFile: File,
-        val tokensFile: File
-    )
+        val model: AsrModelConfig,
+        val files: ModelManager.ResolvedModelFiles
+    ) {
+        val modelId: String get() = model.id
+        val modelType: String get() = model.modelType
+        val encoderFile: File get() = files.encoderFile
+        val decoderFile: File? get() = files.decoderFile
+        val joinerFile: File? get() = files.joinerFile
+        val tokensFile: File get() = files.tokensFile
+    }
+
+    /** The spoken language to lock [model] to, if it supports locking; null = detect. */
+    private fun languageHintFor(model: AsrModelConfig): String? {
+        val hint = spokenLanguageHint?.lowercase() ?: return null
+        return when {
+            model.languageHints == ModelManager.WHISPER_ANY_LANGUAGE -> hint
+            hint in model.languageHints -> hint
+            else -> null
+        }
+    }
 
     /**
      * Checks if the selected model has complete, verified ONNX files on disk.
@@ -351,14 +437,7 @@ class SpeechRecognizerEngine(
      */
     internal fun resolveModelForLoad(): LoadedModelFiles? {
         val resolved = modelManager.resolveSelectedModelFiles() ?: return null
-        return LoadedModelFiles(
-            modelId = resolved.model.id,
-            modelType = resolved.model.modelType,
-            encoderFile = resolved.encoderFile,
-            decoderFile = resolved.decoderFile,
-            joinerFile = resolved.joinerFile,
-            tokensFile = resolved.tokensFile
-        )
+        return LoadedModelFiles(model = resolved.model, files = resolved)
     }
 
     /**
@@ -375,6 +454,11 @@ class SpeechRecognizerEngine(
     /** Must hold [recognizerLock]. */
     private fun resetUtteranceState() {
         _partialTextFlow.value = ""
+        currentRawDraft = ""
+        sentenceAssembler.clear()
+        phraseAssembler.clear()
+        lastPhraseLanguage = null
+        noiseTextFilter.reset()
         audioFeedingStarted = false
         synchronized(pcmChunkAccumulator) {
             pcmChunkAccumulator.clear()
@@ -386,6 +470,14 @@ class SpeechRecognizerEngine(
      * Uses in-place reusable buffer with ArrayDeque O(1) removal to eliminate allocation GC overhead.
      */
     fun feedAudioSamples(samples: FloatArray) {
+        // Accuracy mode: the speech detector buffers audio itself
+        synchronized(recognizerLock) {
+            val phraseRecognizer = offlineRecognizer
+            if (phraseRecognizer != null) {
+                feedPhraseRecognizer(phraseRecognizer, samples)
+                return
+            }
+        }
         synchronized(pcmChunkAccumulator) {
             for (sample in samples) {
                 pcmChunkAccumulator.addLast(sample)
@@ -429,6 +521,8 @@ class SpeechRecognizerEngine(
                         // Accumulate full clause in progress
                         val currentText = result.text.trim()
                         val sanitizedDraft = if (SpeechValidator.isGenuineSpeech(currentText)) currentText else ""
+                        // Live text without music/noise scraps (finished pieces are filtered in handleFinishedText)
+                        val liveText = noiseTextFilter.filter(sanitizedDraft, learn = false).orEmpty()
                         val now = System.currentTimeMillis()
 
                         if (recognizer.isEndpoint(stream)) {
@@ -439,14 +533,26 @@ class SpeechRecognizerEngine(
                             Log.w(TAG, "Anti-freeze watchdog: no recognizer output for ${now - lastOutputOrResetTime} ms while audio flows; resetting stream")
                             handleFinishedText(sanitizedDraft, currentUtteranceId, now)
                             stream = finishUtterance(recognizer, stream, now)
-                        } else if (sanitizedDraft.isNotBlank()) {
+                        } else if (liveText.isNotBlank()) {
+                            // The recognizer's own text: on flush, handleFinishedText adds a held
+                            // piece itself, so storing it with the piece added doubled that piece
+                            currentRawDraft = liveText
                             // Show a held one-character piece in front of the new sentence
-                            val shown = withPendingFragment(sanitizedDraft, now, consume = false)
-                            if (shown != _partialTextFlow.value) {
+                            val shown = withPendingFragment(liveText, now, consume = false)
+                            // ...and any finished pieces still waiting for the sentence to end
+                            val draft = sentenceAssembler.onDraft(shown, currentUtteranceId)
+                            if (draft.text != _partialTextFlow.value) {
                                 lastOutputOrResetTime = now
-                                _partialTextFlow.value = shown
-                                emitPartialUtterance(shown, currentUtteranceId)
+                                _partialTextFlow.value = draft.text
+                                emitPartialUtterance(draft.text, draft.utteranceId)
                             }
+                        }
+
+                        // A waiting sentence ends once the speaker has been quiet long enough
+                        sentenceAssembler.onTick(now, isSpeaking = liveText.isNotBlank())?.let { sentence ->
+                            Log.d(TAG, "Sentence complete after pause (utteranceId=${sentence.utteranceId}): ${sentence.text}")
+                            emitFinalUtterance(sentence.text, sentence.utteranceId)
+                            _partialTextFlow.value = ""
                         }
                     }
                 } catch (t: Throwable) {
@@ -474,7 +580,9 @@ class SpeechRecognizerEngine(
      * recording from a device: reset gave 3 phrases in 33 s, fresh streams gave 7).
      */
     private fun finishUtterance(recognizer: OnlineRecognizer, stream: OnlineStream, now: Long): OnlineStream {
-        _partialTextFlow.value = ""
+        // Keep showing pieces that are waiting for the rest of their sentence
+        _partialTextFlow.value = sentenceAssembler.pendingText()
+        currentRawDraft = ""
         val next = recognizer.createStream()
         onlineStream = next
         try {
@@ -493,14 +601,20 @@ class SpeechRecognizerEngine(
      * joined to the start of the next sentence (default), dropped, or kept, per [singleCharacterMode].
      * Splitting a sentence after its first character would otherwise change its meaning.
      */
-    private fun handleFinishedText(text: String, utteranceId: Long, now: Long) {
-        if (text.isBlank()) return
+    private fun handleFinishedText(rawText: String, utteranceId: Long, now: Long) {
+        if (rawText.isBlank()) return
+        val text = noiseTextFilter.filter(rawText, learn = true)
+        if (text == null) {
+            Log.d(TAG, "Dropped likely music/noise text: $rawText")
+            return
+        }
         val isSingleCharacter = text.codePointCount(0, text.length) == 1
         if (isSingleCharacter && singleCharacterMode == SINGLE_CHAR_JOIN_NEXT) {
-            val held = withPendingFragment(text, now, consume = true)
-            pendingFragment = held
+            // Two lone characters in a row are noise, not a split sentence: keep only the newest
+            pendingFragment?.let { Log.d(TAG, "Dropped one-character result (another followed it): $it") }
+            pendingFragment = text
             pendingFragmentTime = now
-            Log.d(TAG, "Holding one-character result to join with the next sentence: $held")
+            Log.d(TAG, "Holding one-character result to join with the next sentence: $text")
             return
         }
         if (isSingleCharacter && singleCharacterMode == SINGLE_CHAR_DROP) {
@@ -508,14 +622,21 @@ class SpeechRecognizerEngine(
             return
         }
         val full = withPendingFragment(text, now, consume = true)
-        Log.d(TAG, "Speech endpoint reached (utteranceId=$utteranceId). Emitting Final: $full")
-        emitFinalUtterance(full, utteranceId)
+        val sentence = sentenceAssembler.onPiece(full, utteranceId, now)
+        if (sentence.isFinal) {
+            Log.d(TAG, "Speech endpoint reached (utteranceId=${sentence.utteranceId}). Emitting Final: ${sentence.text}")
+            emitFinalUtterance(sentence.text, sentence.utteranceId)
+        } else {
+            Log.d(TAG, "Piece held until the sentence ends (utteranceId=${sentence.utteranceId}): ${sentence.text}")
+            emitPartialUtterance(sentence.text, sentence.utteranceId)
+        }
     }
 
     /** Puts a recent held fragment in front of [text]. With [consume], the fragment is used up. */
     private fun withPendingFragment(text: String, now: Long, consume: Boolean): String {
         val fragment = pendingFragment ?: return text
         if (now - pendingFragmentTime > PENDING_FRAGMENT_MAX_AGE_MS) {
+            Log.d(TAG, "Dropped one-character result (no speech right after it): $fragment")
             pendingFragment = null
             return text
         }
@@ -529,13 +650,59 @@ class SpeechRecognizerEngine(
         utteranceEvents.trySend(AsrUtteranceEvent.Partial(trimmed, utteranceId = utteranceId))
     }
 
-    private fun emitFinalUtterance(clause: String, utteranceId: Long) {
+    /** Must hold [recognizerLock]. Accuracy mode: detect phrases, recognize, join, emit. */
+    private fun feedPhraseRecognizer(phraseRecognizer: OfflinePhraseRecognizer, samples: FloatArray) {
+        try {
+            _engineState.value = RecognizerState.Listening
+            val phrases = phraseRecognizer.accept(samples)
+            val now = System.currentTimeMillis()
+            phrases.forEach { handlePhrase(it, now) }
+            // A phrase cut at a comma waits briefly for the rest of its sentence
+            phraseAssembler.onTick(now, isSpeaking = phraseRecognizer.isSpeaking)?.let { sentence ->
+                emitFinalUtterance(sentence.text, sentence.utteranceId, lastPhraseLanguage)
+                _partialTextFlow.value = ""
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Runtime error in phrase recognizer", t)
+            _engineState.value = RecognizerState.Error("Speech recognizer runtime error: ${t.localizedMessage}")
+        }
+    }
+
+    /** Must hold [recognizerLock]. */
+    private fun handlePhrase(phrase: OfflinePhraseRecognizer.Phrase, now: Long) {
+        if (!phrase.isSpeech) {
+            Log.d(TAG, "Dropped music/laughter: ${phrase.text}")
+            return
+        }
+        if (!SpeechValidator.isGenuineSpeech(phrase.text)) return
+        val text = noiseTextFilter.filter(phrase.text, learn = true)
+        if (text == null) {
+            Log.d(TAG, "Dropped likely music/noise text: ${phrase.text}")
+            return
+        }
+        phrase.language?.let { lastPhraseLanguage = it }
+        val utteranceId = currentUtteranceId
+        currentUtteranceId = utteranceEpochCounter.incrementAndGet()
+        val sentence = phraseAssembler.onPiece(text, utteranceId, now)
+        if (sentence.isFinal) {
+            emitFinalUtterance(sentence.text, sentence.utteranceId, lastPhraseLanguage)
+            _partialTextFlow.value = ""
+        } else {
+            // Shown as live text only; not sent for translation until the sentence is complete
+            _partialTextFlow.value = sentence.text
+        }
+    }
+
+    private fun emitFinalUtterance(clause: String, utteranceId: Long, language: String? = null) {
         val trimmed = clause.trim()
         if (!SpeechValidator.isGenuineSpeech(trimmed)) {
             Log.d(TAG, "Suppressed non-speech status/diagnostic phrase from ASR emission: $trimmed")
             return
         }
         synchronized(confirmedAsrEvents) {
+            // Re-adding doesn't move an entry in a LinkedHashSet: remove first, so a sentence
+            // said again ("はい。") counts as newest and isn't evicted while being translated
+            confirmedAsrEvents.remove(trimmed)
             confirmedAsrEvents.add(trimmed)
             if (confirmedAsrEvents.size > 200) {
                 val it = confirmedAsrEvents.iterator()
@@ -545,7 +712,7 @@ class SpeechRecognizerEngine(
                 }
             }
         }
-        utteranceEvents.trySend(AsrUtteranceEvent.Final(trimmed, utteranceId = utteranceId))
+        utteranceEvents.trySend(AsrUtteranceEvent.Final(trimmed, utteranceId = utteranceId, language = language))
     }
 
     /**
@@ -553,9 +720,16 @@ class SpeechRecognizerEngine(
      */
     fun flushCurrentSegment() {
         synchronized(recognizerLock) {
+            offlineRecognizer?.let { phraseRecognizer ->
+                val now = System.currentTimeMillis()
+                phraseRecognizer.flush().forEach { handlePhrase(it, now) }
+                phraseAssembler.flush()?.let { emitFinalUtterance(it.text, it.utteranceId, lastPhraseLanguage) }
+                _partialTextFlow.value = ""
+                return
+            }
             val recognizer = onlineRecognizer
             val stream = onlineStream
-            val current = _partialTextFlow.value.trim()
+            val current = currentRawDraft.trim()
             if (current.isNotEmpty()) {
                 val epochId = currentUtteranceId
                 handleFinishedText(current, epochId, System.currentTimeMillis())
@@ -568,6 +742,14 @@ class SpeechRecognizerEngine(
                     currentUtteranceId = utteranceEpochCounter.incrementAndGet()
                 }
             }
+            // Don't leave the last pieces waiting when capture stops
+            sentenceAssembler.flush()?.let { emitFinalUtterance(it.text, it.utteranceId) }
+            // A held one-character piece only joins speech that follows it, and none will now
+            // (same rule as withPendingFragment's time limit); don't carry it into the next capture
+            pendingFragment?.let { Log.d(TAG, "Dropped one-character result (capture stopped): $it") }
+            pendingFragment = null
+            _partialTextFlow.value = ""
+            currentRawDraft = ""
         }
         synchronized(pcmChunkAccumulator) {
             pcmChunkAccumulator.clear()
@@ -576,19 +758,25 @@ class SpeechRecognizerEngine(
 
     fun release() {
         synchronized(recognizerLock) {
-            try {
-                onlineStream?.release()
-                onlineRecognizer?.release()
-            } catch (t: Throwable) {
-                Log.e(TAG, "Error releasing recognizer native pointers", t)
-            } finally {
-                onlineStream = null
-                onlineRecognizer = null
-                loadedConfig = null
-                resetUtteranceState()
-                _engineState.value = RecognizerState.Uninitialized
-            }
+            releaseRecognizersLocked()
+            loadedConfig = null
+            resetUtteranceState()
+            _engineState.value = RecognizerState.Uninitialized
         }
+    }
+
+    /** Must hold [recognizerLock]. Frees whichever recognizer is loaded. */
+    private fun releaseRecognizersLocked() {
+        try {
+            onlineStream?.release()
+            onlineRecognizer?.release()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Error releasing recognizer native pointers", t)
+        }
+        offlineRecognizer?.release()
+        onlineStream = null
+        onlineRecognizer = null
+        offlineRecognizer = null
     }
 
     /**

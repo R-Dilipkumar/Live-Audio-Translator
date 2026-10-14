@@ -50,8 +50,10 @@ class ModelSelectionTest {
     @Test
     fun catalogueHasOneModelPerLanguageAndOneMultilingual() {
         val manager = ModelManager(context)
-        val single = manager.availableModels.filter { !it.isMultilingual }
-        assertEquals(1, manager.availableModels.count { it.isMultilingual })
+        // Instant (streaming) models: one per language plus one multilingual
+        val streaming = manager.modelsFor(com.example.asr.RecognitionMode.SPEED)
+        val single = streaming.filter { !it.isMultilingual }
+        assertEquals(1, streaming.count { it.isMultilingual })
         assertEquals(single.size, single.map { it.languageCode }.toSet().size)
         assertTrue(manager.availableModels.all { it.downloadUrl.startsWith(ModelManager.RELEASE_URL) })
     }

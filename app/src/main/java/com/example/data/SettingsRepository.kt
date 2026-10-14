@@ -30,6 +30,8 @@ data class AppSettings(
     val noSpeechRestartDelay: Float = 1.2f, // seconds, 0.5 to 3.0: no words -> fresh stream
     val minSentenceLength: Float = 0.0f,    // seconds, 0 to 3: shortest sentence a pause may end
     val singleCharacterMode: Int = 0, // 0 join to next sentence, 1 drop, 2 keep as its own line
+    val isSentenceJoiningEnabled: Boolean = true, // hold pieces until the sentence ends, then translate it whole
+    val isNoiseTextFilterEnabled: Boolean = true, // drop text that looks like music or noise
     val languageIdConfidence: Float = 0.5f, // 0.30 to 0.90
     val isAntiFreezeWatchdogEnabled: Boolean = true,
     val isDebugAudioRecordingEnabled: Boolean = false, // saves recognizer input to files/debug
@@ -38,8 +40,11 @@ data class AppSettings(
     val subtitleLingerTimeSeconds: Float = 4.0f, // 1 to 10 s, or 0 for "until the next sentence"
     val overlayOpacity: Float = 0.9f, // 0.20 to 1.00
     val fontSizeSp: Float = 18.0f, // 12 to 26
-    val maxDisplayLines: Int = 2, // 1, 2, or 3
+    val maxDisplayLines: Int = 2, // 1 to 4
     val showOriginalSpeech: Boolean = true,
+    val subtitleStyle: Int = 1, // SubtitleStyle code: 0 movie cards, 1 roll-up, 2 live
+    val isAutoOverlayEnabled: Boolean = true, // open the floating subtitles when capture starts
+    val overlayWidthDp: Int = 0, // floating window width set by resizing; 0 = automatic
 
     // ---- Developer: subtitle rendering ----
     val isTextOutlineShadowEnabled: Boolean = true,
@@ -62,6 +67,8 @@ class SettingsRepository(context: Context) {
         val KEY_NO_SPEECH_RESTART = floatPreferencesKey("pref_no_speech_restart")
         val KEY_MIN_SENTENCE = floatPreferencesKey("pref_min_sentence_length")
         val KEY_SINGLE_CHAR_MODE = intPreferencesKey("pref_single_char_mode")
+        val KEY_SENTENCE_JOINING = booleanPreferencesKey("pref_sentence_joining")
+        val KEY_NOISE_TEXT_FILTER = booleanPreferencesKey("pref_noise_text_filter")
         val KEY_DEBUG_RECORD = booleanPreferencesKey("pref_debug_record_audio")
         val KEY_SETTINGS_VERSION = intPreferencesKey("pref_settings_version")
         val KEY_ENDPOINT_DELAY = floatPreferencesKey("pref_endpoint_delay")
@@ -73,6 +80,11 @@ class SettingsRepository(context: Context) {
         val KEY_FONT_SIZE = floatPreferencesKey("pref_font_size")
         val KEY_MAX_LINES = intPreferencesKey("pref_max_lines")
         val KEY_SHOW_ORIGINAL = booleanPreferencesKey("pref_show_original")
+        // Older on/off setting (movie vs live); only read to carry a saved choice over
+        val KEY_MOVIE_STYLE = booleanPreferencesKey("pref_movie_subtitle_style")
+        val KEY_SUBTITLE_STYLE = intPreferencesKey("pref_subtitle_style")
+        val KEY_AUTO_OVERLAY = booleanPreferencesKey("pref_auto_overlay")
+        val KEY_OVERLAY_WIDTH = intPreferencesKey("pref_overlay_width_dp")
         val KEY_TEXT_OUTLINE_SHADOW = booleanPreferencesKey("pref_text_outline_shadow")
         val KEY_TEXT_SHADOW_RADIUS = floatPreferencesKey("pref_text_shadow_radius")
     }
@@ -88,6 +100,8 @@ class SettingsRepository(context: Context) {
             noSpeechRestartDelay = preferences[PreferencesKeys.KEY_NO_SPEECH_RESTART] ?: d.noSpeechRestartDelay,
             minSentenceLength = preferences[PreferencesKeys.KEY_MIN_SENTENCE] ?: d.minSentenceLength,
             singleCharacterMode = preferences[PreferencesKeys.KEY_SINGLE_CHAR_MODE] ?: d.singleCharacterMode,
+            isSentenceJoiningEnabled = preferences[PreferencesKeys.KEY_SENTENCE_JOINING] ?: d.isSentenceJoiningEnabled,
+            isNoiseTextFilterEnabled = preferences[PreferencesKeys.KEY_NOISE_TEXT_FILTER] ?: d.isNoiseTextFilterEnabled,
             languageIdConfidence = preferences[PreferencesKeys.KEY_LANG_CONFIDENCE] ?: d.languageIdConfidence,
             isAntiFreezeWatchdogEnabled = preferences[PreferencesKeys.KEY_ANTI_FREEZE] ?: d.isAntiFreezeWatchdogEnabled,
             isDebugAudioRecordingEnabled = preferences[PreferencesKeys.KEY_DEBUG_RECORD] ?: d.isDebugAudioRecordingEnabled,
@@ -96,6 +110,11 @@ class SettingsRepository(context: Context) {
             fontSizeSp = preferences[PreferencesKeys.KEY_FONT_SIZE] ?: d.fontSizeSp,
             maxDisplayLines = preferences[PreferencesKeys.KEY_MAX_LINES] ?: d.maxDisplayLines,
             showOriginalSpeech = preferences[PreferencesKeys.KEY_SHOW_ORIGINAL] ?: d.showOriginalSpeech,
+            subtitleStyle = preferences[PreferencesKeys.KEY_SUBTITLE_STYLE]
+                ?: preferences[PreferencesKeys.KEY_MOVIE_STYLE]?.let { movie -> if (movie) 0 else 2 }
+                ?: d.subtitleStyle,
+            isAutoOverlayEnabled = preferences[PreferencesKeys.KEY_AUTO_OVERLAY] ?: d.isAutoOverlayEnabled,
+            overlayWidthDp = preferences[PreferencesKeys.KEY_OVERLAY_WIDTH] ?: d.overlayWidthDp,
             isTextOutlineShadowEnabled = preferences[PreferencesKeys.KEY_TEXT_OUTLINE_SHADOW] ?: d.isTextOutlineShadowEnabled,
             textShadowRadius = preferences[PreferencesKeys.KEY_TEXT_SHADOW_RADIUS] ?: d.textShadowRadius
         )
@@ -123,6 +142,14 @@ class SettingsRepository(context: Context) {
 
     suspend fun updateSingleCharacterMode(mode: Int) {
         appContext.dataStore.edit { it[PreferencesKeys.KEY_SINGLE_CHAR_MODE] = mode }
+    }
+
+    suspend fun updateSentenceJoining(enabled: Boolean) {
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_SENTENCE_JOINING] = enabled }
+    }
+
+    suspend fun updateNoiseTextFilter(enabled: Boolean) {
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_NOISE_TEXT_FILTER] = enabled }
     }
 
     suspend fun updateNoiseGateThreshold(threshold: Float) {
@@ -173,6 +200,44 @@ class SettingsRepository(context: Context) {
         appContext.dataStore.edit { it[PreferencesKeys.KEY_TEXT_SHADOW_RADIUS] = radius }
     }
 
+    suspend fun updateSubtitleStyle(styleCode: Int) {
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_SUBTITLE_STYLE] = styleCode }
+    }
+
+    /**
+     * Saves everything the floating window's own settings panel can change, in one write. One
+     * write means one settingsFlow emission, so no half-saved state flows back into the window.
+     */
+    suspend fun updateOverlaySettings(
+        fontSizeSp: Float,
+        opacity: Float,
+        maxLines: Int,
+        showOriginal: Boolean,
+        lingerSeconds: Float,
+        textShadow: Boolean,
+        textShadowRadius: Float,
+        styleCode: Int
+    ) {
+        appContext.dataStore.edit {
+            it[PreferencesKeys.KEY_FONT_SIZE] = fontSizeSp
+            it[PreferencesKeys.KEY_OPACITY] = opacity
+            it[PreferencesKeys.KEY_MAX_LINES] = maxLines
+            it[PreferencesKeys.KEY_SHOW_ORIGINAL] = showOriginal
+            it[PreferencesKeys.KEY_LINGER_TIME] = lingerSeconds
+            it[PreferencesKeys.KEY_TEXT_OUTLINE_SHADOW] = textShadow
+            it[PreferencesKeys.KEY_TEXT_SHADOW_RADIUS] = textShadowRadius
+            it[PreferencesKeys.KEY_SUBTITLE_STYLE] = styleCode
+        }
+    }
+
+    suspend fun updateAutoOverlay(enabled: Boolean) {
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_AUTO_OVERLAY] = enabled }
+    }
+
+    suspend fun updateOverlayWidth(widthDp: Int) {
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_OVERLAY_WIDTH] = widthDp }
+    }
+
     /**
      * Older versions saved audio settings that cut quiet speech (a noise gate and a 3.5 kHz
      * filter). Resets the developer settings once so existing installs get the tuned defaults.
@@ -192,7 +257,11 @@ class SettingsRepository(context: Context) {
                 PreferencesKeys.KEY_OPACITY,
                 PreferencesKeys.KEY_FONT_SIZE,
                 PreferencesKeys.KEY_MAX_LINES,
-                PreferencesKeys.KEY_SHOW_ORIGINAL
+                PreferencesKeys.KEY_SHOW_ORIGINAL,
+                PreferencesKeys.KEY_MOVIE_STYLE,
+                PreferencesKeys.KEY_SUBTITLE_STYLE,
+                PreferencesKeys.KEY_AUTO_OVERLAY,
+                PreferencesKeys.KEY_OVERLAY_WIDTH
             ).forEach { preferences.remove(it) }
         }
     }
@@ -209,6 +278,8 @@ class SettingsRepository(context: Context) {
                 PreferencesKeys.KEY_NO_SPEECH_RESTART,
                 PreferencesKeys.KEY_MIN_SENTENCE,
                 PreferencesKeys.KEY_SINGLE_CHAR_MODE,
+                PreferencesKeys.KEY_SENTENCE_JOINING,
+                PreferencesKeys.KEY_NOISE_TEXT_FILTER,
                 PreferencesKeys.KEY_LANG_CONFIDENCE,
                 PreferencesKeys.KEY_ANTI_FREEZE,
                 PreferencesKeys.KEY_DEBUG_RECORD,

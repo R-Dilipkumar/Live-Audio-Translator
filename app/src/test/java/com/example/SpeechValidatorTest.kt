@@ -40,9 +40,10 @@ class SpeechValidatorTest {
     }
 
     @Test
-    fun bracketedStatusIsRejectedButDownloadingIsKept() {
+    fun bracketedStatusIsRejected() {
         assertFalse(SpeechValidator.isGenuineSpeech("[Translation Paused]"))
-        assertTrue(SpeechValidator.isGenuineSpeech("[Downloading En-Ja dictionary...]"))
+        // Download notices are status too and must not show up as subtitles
+        assertFalse(SpeechValidator.isGenuineSpeech("[Downloading En-Ja dictionary...]"))
     }
 
     @Test

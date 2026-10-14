@@ -61,6 +61,8 @@ import java.util.Locale
 @Composable
 fun SettingsScreen(
     viewModel: AudioTranslatorViewModel,
+    // Opens the Models tab (the "Get it" button when the chosen latency's model is missing)
+    onOpenModels: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var showDeveloper by rememberSaveable { mutableStateOf(false) }
@@ -68,7 +70,7 @@ fun SettingsScreen(
         BackHandler { showDeveloper = false }
         DeveloperSettings(viewModel = viewModel, onBack = { showDeveloper = false }, modifier = modifier)
     } else {
-        UserSettings(viewModel = viewModel, onOpenDeveloper = { showDeveloper = true }, modifier = modifier)
+        UserSettings(viewModel = viewModel, onOpenDeveloper = { showDeveloper = true }, onOpenModels = onOpenModels, modifier = modifier)
     }
 }
 
@@ -76,6 +78,7 @@ fun SettingsScreen(
 private fun UserSettings(
     viewModel: AudioTranslatorViewModel,
     onOpenDeveloper: () -> Unit,
+    onOpenModels: (() -> Unit)?,
     modifier: Modifier
 ) {
     val settings by viewModel.appSettings.collectAsStateWithLifecycle()
@@ -90,6 +93,19 @@ private fun UserSettings(
             .testTag("settings_screen_container"),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        SettingsGroup(icon = Icons.Default.Subtitles, title = "Recognition") {
+            val mode by viewModel.recognitionMode.collectAsStateWithLifecycle()
+            val model by viewModel.selectedAsrModel.collectAsStateWithLifecycle()
+            val ready by viewModel.readyModelIds.collectAsStateWithLifecycle()
+            LatencyPreference(
+                mode = mode,
+                modelName = model.name,
+                isModelInstalled = model.id in ready,
+                onSelect = { viewModel.setRecognitionMode(it) },
+                onOpenModels = onOpenModels
+            )
+        }
+
         SettingsGroup(icon = Icons.Default.Subtitles, title = "Subtitles") {
             SliderSetting(
                 title = "Text size",
@@ -102,10 +118,18 @@ private fun UserSettings(
 
             ChoiceSetting(
                 title = "Lines shown",
-                options = listOf(1 to "1 line", 2 to "2 lines", 3 to "3 lines"),
+                options = listOf(1 to "1", 2 to "2", 3 to "3", 4 to "4"),
                 selected = settings.maxDisplayLines,
                 tagPrefix = "chip_max_lines_"
             ) { scope.launch { repo.updateMaxDisplayLines(it) } }
+
+            ChoiceSetting(
+                title = "Subtitle style",
+                subtitle = "Roll-up: lines stack and roll up, scroll back to reread. Movie: whole cards that hold. Live: one line rewritten as words arrive.",
+                options = listOf(1 to "Roll-up", 0 to "Movie", 2 to "Live"),
+                selected = settings.subtitleStyle,
+                tagPrefix = "chip_subtitle_style_"
+            ) { scope.launch { repo.updateSubtitleStyle(it) } }
 
             ChoiceSetting(
                 title = "Keep subtitles on screen",
@@ -121,6 +145,13 @@ private fun UserSettings(
                 range = 0.2f..1f,
                 tag = "slider_overlay_opacity"
             ) { scope.launch { repo.updateOverlayOpacity(it) } }
+
+            SwitchSetting(
+                title = "Open subtitles when starting",
+                subtitle = "Show the floating subtitles over other apps as soon as you press Start",
+                checked = settings.isAutoOverlayEnabled,
+                tag = "toggle_auto_overlay"
+            ) { scope.launch { repo.updateAutoOverlay(it) } }
 
             SwitchSetting(
                 title = "Show original speech",
@@ -261,6 +292,20 @@ private fun DeveloperSettings(
                 selected = settings.singleCharacterMode,
                 tagPrefix = "chip_single_char_"
             ) { scope.launch { repo.updateSingleCharacterMode(it) } }
+
+            SwitchSetting(
+                title = "Translate whole sentences",
+                subtitle = "Hold the pieces of a sentence that is split by a short pause and translate it once it is finished. Better translations, slightly later. Default: on",
+                checked = settings.isSentenceJoiningEnabled,
+                tag = "toggle_sentence_joining"
+            ) { scope.launch { repo.updateSentenceJoining(it) } }
+
+            SwitchSetting(
+                title = "Filter music and noise",
+                subtitle = "Drop recognized text that looks like music or noise: filler sounds, repeated syllables, and stray characters in another script (for example Chinese characters during English speech). Default: on",
+                checked = settings.isNoiseTextFilterEnabled,
+                tag = "toggle_noise_text_filter"
+            ) { scope.launch { repo.updateNoiseTextFilter(it) } }
 
             SliderSetting(
                 title = "Longest sentence",

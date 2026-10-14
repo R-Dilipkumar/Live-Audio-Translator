@@ -46,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -54,6 +55,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.asr.AsrModelConfig
 import com.example.asr.ModelDownloadState
+import com.example.asr.RecognitionMode
 import com.example.translate.SupportedLanguage
 
 @Composable
@@ -65,7 +67,12 @@ fun ModelManagementScreen(
     val activeDownloadId by viewModel.activeAsrDownloadId.collectAsStateWithLifecycle()
     val selectedAsrModel by viewModel.selectedAsrModel.collectAsStateWithLifecycle()
     val readyModelIds by viewModel.readyModelIds.collectAsStateWithLifecycle()
+    val mode by viewModel.recognitionMode.collectAsStateWithLifecycle()
+    val chosenModelIds by viewModel.chosenAsrModelIds.collectAsStateWithLifecycle()
+    val lastDownloadId by viewModel.lastAsrDownloadId.collectAsStateWithLifecycle()
     val availableStorageMb by viewModel.availableStorageMb.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val isCapturing by viewModel.isCapturing.collectAsStateWithLifecycle()
 
     val packLanguages = viewModel.targetAvailableLanguages
     val downloadedLanguages by viewModel.downloadedLanguages.collectAsStateWithLifecycle()
@@ -87,26 +94,63 @@ fun ModelManagementScreen(
             SectionHeader(
                 icon = Icons.Default.Mic,
                 title = "Speech recognition",
-                subtitle = "Pick the language you will listen to. One model is used at a time."
+                subtitle = "The app transcribes with one model at a time: the one marked In use. " +
+                    "Each latency keeps its own model. Downloading a model doesn't switch to it."
             )
         }
 
-        items(viewModel.availableAsrModels, key = { it.id }) { model ->
+        // Both kinds are listed; using a model of the other kind also switches the latency
+        listOf(
+            RecognitionMode.SPEED to "Instant (live words)",
+            RecognitionMode.ACCURACY to "About 1 second (whole phrases, most accurate)"
+        ).forEach { (groupMode, groupTitle) ->
+        item(key = "group_${groupMode.name}") {
+            Column(modifier = Modifier.padding(top = 6.dp, start = 4.dp)) {
+                Text(
+                    text = groupTitle + if (groupMode == mode) "  ·  your latency" else "",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (groupMode == mode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (groupMode != mode) {
+                    Text(
+                        text = "Using one of these also switches Preferred latency to ${latencyLabel(groupMode)}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        items(viewModel.availableAsrModels.filter { it.mode == groupMode }, key = { it.id }) { model ->
             val isDownloadingThis = activeDownloadId == model.id
+            val isInstalled = model.id in readyModelIds
+            val isChosenForItsLatency = chosenModelIds[model.mode] == model.id
+            // A download error belongs to the model that was being downloaded
+            val errorModelId = lastDownloadId ?: selectedAsrModel.id
             SpeechModelCard(
                 model = model,
-                isSelected = model.id == selectedAsrModel.id,
-                isInstalled = model.id in readyModelIds,
-                downloadState = if (isDownloadingThis || model.id == selectedAsrModel.id) downloadState else null,
+                isInUse = isInstalled && model.mode == mode && model.id == selectedAsrModel.id,
+                pickedForOtherLatency = if (isInstalled && isChosenForItsLatency && model.mode != mode) latencyLabel(model.mode) else null,
+                switchesLatencyTo = if (model.mode != mode) latencyLabel(model.mode) else null,
+                isInstalled = isInstalled,
+                downloadState = if (isDownloadingThis) downloadState else null,
+                errorMessage = (downloadState as? ModelDownloadState.Error)?.errorMsg
+                    ?.takeIf { model.id == errorModelId && !isDownloadingThis },
                 isDownloadingThis = isDownloadingThis,
                 anotherDownloadRunning = activeDownloadId != null && !isDownloadingThis,
-                onSelect = { viewModel.selectAsrModel(model) },
-                onDownload = {
+                onSelect = {
                     viewModel.selectAsrModel(model)
-                    viewModel.downloadAsrModel(model)
+                    android.widget.Toast.makeText(
+                        context,
+                        if (isCapturing) "${model.name} · ${latencyLabel(model.mode)} will be used the next time you press Start"
+                        else "Now transcribing with ${model.name} · ${latencyLabel(model.mode)}",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
                 },
+                onDownload = { viewModel.downloadAsrModel(model) },
                 onDelete = { viewModel.deleteAsrModel(model) }
             )
+        }
         }
 
         item {
@@ -128,6 +172,68 @@ fun ModelManagementScreen(
         }
 
         item { Spacer(modifier = Modifier.height(24.dp)) }
+    }
+}
+
+/**
+ * "Preferred latency": how soon subtitles appear. Instant uses a streaming model (words appear
+ * while spoken); about 1 second uses a whole-phrase model (text appears when the speaker pauses,
+ * with punctuation and far fewer mistakes). Shows the model used for the chosen latency.
+ */
+@Composable
+fun LatencyPreference(
+    mode: RecognitionMode,
+    modelName: String,
+    isModelInstalled: Boolean,
+    onSelect: (RecognitionMode) -> Unit,
+    onOpenModels: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text("Preferred latency", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            listOf(
+                RecognitionMode.SPEED to "Instant",
+                RecognitionMode.ACCURACY to "About 1 second"
+            ).forEach { (option, label) ->
+                androidx.compose.material3.FilterChip(
+                    selected = mode == option,
+                    onClick = { onSelect(option) },
+                    label = { Text(label) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("latency_${option.name.lowercase()}")
+                )
+            }
+        }
+        Text(
+            text = if (mode == RecognitionMode.SPEED) {
+                "Words appear while they are spoken. Quickest, but mishears more."
+            } else {
+                "Text appears when the speaker pauses, with punctuation and far fewer mistakes. Whole sentences are translated."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+            Icon(
+                imageVector = if (isModelInstalled) Icons.Default.CheckCircle else Icons.Default.CloudDownload,
+                contentDescription = null,
+                tint = if (isModelInstalled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = if (isModelInstalled) "Model: $modelName" else "Model: $modelName (not downloaded)",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f)
+            )
+            if (!isModelInstalled && onOpenModels != null) {
+                androidx.compose.material3.TextButton(onClick = onOpenModels) { Text("Get it") }
+            }
+        }
     }
 }
 
@@ -191,16 +297,22 @@ private fun SectionHeader(icon: ImageVector, title: String, subtitle: String) {
 @Composable
 private fun SpeechModelCard(
     model: AsrModelConfig,
-    isSelected: Boolean,
+    // The model transcribing right now
+    isInUse: Boolean,
+    // Latency name when this is the model kept for the other latency, else null
+    pickedForOtherLatency: String?,
+    // Latency name when using this model also switches the latency, else null
+    switchesLatencyTo: String?,
     isInstalled: Boolean,
     downloadState: ModelDownloadState?,
+    errorMessage: String?,
     isDownloadingThis: Boolean,
     anotherDownloadRunning: Boolean,
     onSelect: () -> Unit,
     onDownload: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val isActive = isSelected && isInstalled
+    val isActive = isInUse
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -230,6 +342,13 @@ private fun SpeechModelCard(
                         if (isActive) {
                             Spacer(modifier = Modifier.width(8.dp))
                             Pill(text = "In use", container = MaterialTheme.colorScheme.primary, content = MaterialTheme.colorScheme.onPrimary)
+                        } else if (pickedForOtherLatency != null) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Pill(
+                                text = "Kept for $pickedForOtherLatency",
+                                container = MaterialTheme.colorScheme.secondaryContainer,
+                                content = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
                         }
                     }
                     Text(
@@ -270,7 +389,7 @@ private fun SpeechModelCard(
                 isDownloadingThis && downloadState is ModelDownloadState.Extracting -> {
                     ProgressBlock(progress = null, left = "Unpacking…", right = "")
                 }
-                isInstalled -> {
+                isInstalled -> Column {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -285,18 +404,11 @@ private fun SpeechModelCard(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Installed",
+                            text = if (isActive) "Installed · transcribing with this model" else "Installed",
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.weight(1f)
                         )
-                        if (!isSelected) {
-                            OutlinedButton(
-                                onClick = onSelect,
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.testTag("select_asr_${model.id}")
-                            ) { Text("Use this model") }
-                        }
                         IconButton(
                             onClick = onDelete,
                             modifier = Modifier.testTag("delete_asr_${model.id}")
@@ -305,6 +417,20 @@ private fun SpeechModelCard(
                                 imageVector = Icons.Default.DeleteOutline,
                                 contentDescription = "Delete ${model.name} model",
                                 tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                    if (!isActive) {
+                        OutlinedButton(
+                            onClick = onSelect,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("select_asr_${model.id}")
+                        ) {
+                            Text(
+                                if (switchesLatencyTo != null) "Use this model (switches to $switchesLatencyTo)"
+                                else "Use this model"
                             )
                         }
                     }
@@ -331,7 +457,7 @@ private fun SpeechModelCard(
                 }
             }
 
-            if (isSelected && !isDownloadingThis && downloadState is ModelDownloadState.Error) {
+            if (errorMessage != null) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -349,7 +475,7 @@ private fun SpeechModelCard(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = downloadState.errorMsg,
+                        text = errorMessage,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )

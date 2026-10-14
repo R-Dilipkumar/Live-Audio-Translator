@@ -30,6 +30,8 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            // Window first: if the capture fails right away, the service can close it again
+            openOverlayIfEnabled()
             viewModel.startInternalCapture(result.resultCode, result.data!!)
         } else {
             viewModel.showError("Audio capture permission was denied or cancelled.")
@@ -45,6 +47,7 @@ class MainActivity : ComponentActivity() {
         val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
         if (recordAudioGranted) {
             if (pendingMicCapture) {
+                openOverlayIfEnabled()
                 viewModel.startMicCapture()
             } else {
                 launchScreenCaptureIntent()
@@ -61,7 +64,7 @@ class MainActivity : ComponentActivity() {
     ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && Settings.canDrawOverlays(this)) {
             viewModel.startFloatingOverlay()
-            Toast.makeText(this, "Floating Subtitle Window enabled", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Floating subtitles on", Toast.LENGTH_SHORT).show()
         } else {
             viewModel.showError("Floating window overlay permission was not granted.")
         }
@@ -82,11 +85,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    fun requestFloatingOverlay() {
+    /** Opens the floating subtitles together with capture, unless turned off in Settings. */
+    private fun openOverlayIfEnabled() {
+        if (viewModel.appSettings.value.isAutoOverlayEnabled) {
+            requestFloatingOverlay(quiet = true)
+        }
+    }
+
+    fun requestFloatingOverlay(quiet: Boolean = false) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             if (!Settings.canDrawOverlays(this)) {
                 // Requirement 2: Show explanatory snackbar and trigger explicit Intent with package URI
-                val explanation = "Please grant 'Display over other apps' to float subtitles over videos and games."
+                val explanation = "Allow 'Display over other apps' so subtitles can float over videos and games."
                 Toast.makeText(this, explanation, Toast.LENGTH_LONG).show()
                 viewModel.showError(explanation)
 
@@ -102,7 +112,7 @@ class MainActivity : ComponentActivity() {
                 }
             } else {
                 viewModel.startFloatingOverlay()
-                Toast.makeText(this, "Floating Subtitle Window active", Toast.LENGTH_SHORT).show()
+                if (!quiet) Toast.makeText(this, "Floating subtitles on", Toast.LENGTH_SHORT).show()
             }
         } else {
             viewModel.startFloatingOverlay()
@@ -131,6 +141,7 @@ class MainActivity : ComponentActivity() {
             permissionLauncher.launch(permissionsToRequest.toTypedArray())
         } else {
             if (isMic) {
+                openOverlayIfEnabled()
                 viewModel.startMicCapture()
             } else {
                 launchScreenCaptureIntent()

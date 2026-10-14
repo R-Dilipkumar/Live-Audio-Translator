@@ -58,9 +58,8 @@ object SpeechValidator {
             return false
         }
 
-        // Diagnostic brackets such as [Translation Paused], [Status], etc.
-        // Allows model downloading indicators (e.g., [Downloading En-Ja dictionary...])
-        if (trimmed.startsWith("[") && trimmed.endsWith("]") && !trimmed.contains("downloading", ignoreCase = true)) {
+        // Diagnostic brackets such as [Translation Paused], [Downloading ...], [Status]
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
             return false
         }
 

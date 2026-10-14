@@ -53,6 +53,9 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     val selectedAsrModel: StateFlow<AsrModelConfig> = modelManager.selectedModel
     val activeAsrDownloadId: StateFlow<String?> = modelManager.activeDownloadId
     val availableAsrModels: List<AsrModelConfig> = modelManager.availableModels
+    // The model each latency uses, and the model of the latest download attempt
+    val chosenAsrModelIds: StateFlow<Map<com.example.asr.RecognitionMode, String>> = modelManager.chosenModelIds
+    val lastAsrDownloadId: StateFlow<String?> = modelManager.lastDownloadId
 
     // False once the startup scan has run and the selected model is not on disk.
     // Starts true so the "no model installed" hint does not flash before the scan finishes.
@@ -65,6 +68,8 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
 
     fun initializeSpeechRecognizer() {
         viewModelScope.launch(Dispatchers.IO) {
+            // Accuracy-mode models can be locked to the chosen spoken language
+            speechEngine.spokenLanguageHint = sourceLanguage.value.takeUnless { it.isAutoDetect }?.code
             if (!modelManager.isSelectedModelReady()) {
                 Log.w("AudioTranslatorViewModel", "Cannot initialize speech recognizer: selected model ${modelManager.selectedModel.value.id} is not installed")
                 return@launch
@@ -152,6 +157,13 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    // "Language pack not downloaded (Japanese → English)" from the latest result, shown as a
+    // banner while a pack is still missing. Subtitles never show it (it is not a translation).
+    private val _packMissingMessage = MutableStateFlow<String?>(null)
+    val translationPackWarning: StateFlow<String?> = combine(_packMissingMessage, translatorEngine.isModelMissing) { message, missing ->
+        message.takeIf { missing }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
     // Rejects translation results that are older than what is shown, or a partial arriving
     // after the final of the same utterance.
     private val subtitleOrderGate = SubtitleOrderGate()
@@ -179,47 +191,44 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
             }
         }
 
-        // Collect recognized speech from ASR engine and feed to translator if capture service is not active
+        // Show recognized speech as it arrives. Translating it is the capture service's
+        // process-wide pipeline's job (AudioCaptureService.ensurePipeline); doing it here too
+        // would translate and save the last sentence twice after Stop.
         viewModelScope.launch {
-            var lastPartialDispatchTime = 0L
-            val partialDebounceMs = 480L
-
             speechEngine.utteranceFlow.collect { event ->
                 when (event) {
                     is com.example.asr.AsrUtteranceEvent.Partial -> {
                         if (SpeechValidator.isGenuineSpeech(event.text)) {
                             _currentOriginalSpeech.value = event.text
-                            if (!isCapturing.value) {
-                                val now = System.currentTimeMillis()
-                                if (now - lastPartialDispatchTime >= partialDebounceMs) {
-                                    lastPartialDispatchTime = now
-                                    translatorEngine.translateText(event.text, isFinal = false, utteranceId = event.utteranceId)
-                                }
-                            }
                         }
                     }
                     is com.example.asr.AsrUtteranceEvent.Final -> {
                         if (SpeechValidator.isGenuineSpeech(event.text) && speechEngine.isConfirmedAsrEvent(event.text)) {
                             _currentOriginalSpeech.value = event.text
-                            if (!isCapturing.value) {
-                                translatorEngine.translateText(event.text, isFinal = true, utteranceId = event.utteranceId)
-                            }
                         }
                     }
                 }
             }
         }
 
-        // Collect completed translations for live UI display.
-        // Pure speech validation ensures status strings never pollute display states.
+        // Collect completed translations for live UI display. Only real translations are shown
+        // as translated text; status results ("Detecting language…", "Translation unavailable",
+        // a missing pack) never are. A missing pack is reported in a banner instead.
         viewModelScope.launch {
             translatorEngine.translationFlow.collect { result ->
-                if (SpeechValidator.isGenuineSpeech(result.originalText) && subtitleOrderGate.accept(result)) {
-                    _currentOriginalSpeech.value = result.originalText
+                if (!SpeechValidator.isGenuineSpeech(result.originalText) || !subtitleOrderGate.accept(result)) return@collect
+                _currentOriginalSpeech.value = result.originalText
+                if (result.status.isTranslation) {
+                    _packMissingMessage.value = null
                     if (SpeechValidator.isGenuineSpeech(result.translatedText)) {
                         _currentTranslatedSpeech.value = result.translatedText
                     }
                     _liveDraftTranslation.value = if (result.isFinal) "" else result.translatedText
+                } else {
+                    if (result.status == com.example.translate.TranslationStatus.PACK_MISSING) {
+                        _packMissingMessage.value = result.translatedText
+                    }
+                    _liveDraftTranslation.value = ""
                 }
             }
         }
@@ -257,6 +266,8 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
                 speechEngine.noSpeechRestartDelay = settings.noSpeechRestartDelay
                 speechEngine.minSentenceLength = settings.minSentenceLength
                 speechEngine.singleCharacterMode = settings.singleCharacterMode
+                speechEngine.joinSentencePieces = settings.isSentenceJoiningEnabled
+                speechEngine.filterNoiseText = settings.isNoiseTextFilterEnabled
                 speechEngine.isAntiFreezeWatchdogEnabled = settings.isAntiFreezeWatchdogEnabled
                 translatorEngine.confidenceThreshold = settings.languageIdConfidence
 
@@ -267,7 +278,11 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
                     maxSubtitleLines = settings.maxDisplayLines,
                     maxLines = settings.maxDisplayLines,
                     showOriginal = settings.showOriginalSpeech,
-                    lingerTimeSeconds = settings.subtitleLingerTimeSeconds
+                    lingerTimeSeconds = settings.subtitleLingerTimeSeconds,
+                    isTextOutlineShadowEnabled = settings.isTextOutlineShadowEnabled,
+                    textShadowRadius = settings.textShadowRadius,
+                    style = com.example.overlay.SubtitleStyle.fromCode(settings.subtitleStyle),
+                    widthDp = settings.overlayWidthDp
                 )
                 FloatingSubtitleService.updateSettings(updatedFloating)
             }
@@ -309,7 +324,13 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
         val intent = Intent(context, AudioCaptureService::class.java).apply {
             action = AudioCaptureService.ACTION_STOP_CAPTURE
         }
-        ContextCompat.startForegroundService(context, intent)
+        // A plain start: a stop never calls startForeground(), so startForegroundService() would
+        // crash the app if the service was not already in the foreground (e.g. a second tap)
+        context.startService(intent)
+        // The overlay opened with Start closes with Stop
+        if (appSettings.value.isAutoOverlayEnabled && isFloatingOverlayActive.value) {
+            stopFloatingOverlay()
+        }
     }
 
     fun downloadAsrModel(model: AsrModelConfig) {
@@ -333,6 +354,15 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
             // deleteModel may have switched the selection to another installed model
             initializeSpeechRecognizer()
         }
+    }
+
+    // Speed (streaming, word by word) or Accuracy (whole phrases). Each remembers its own model.
+    val recognitionMode: StateFlow<com.example.asr.RecognitionMode> = modelManager.mode
+
+    fun setRecognitionMode(mode: com.example.asr.RecognitionMode) {
+        modelManager.setMode(mode)
+        // Load that mode's model now if installed (no-op during capture; applies on next start)
+        initializeSpeechRecognizer()
     }
 
     fun selectAsrModel(model: AsrModelConfig) {
@@ -367,15 +397,22 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun setSourceLanguage(lang: SupportedLanguage) {
+        _packMissingMessage.value = null
         translatorEngine.setSourceLanguage(lang)
+        // Re-lock Accuracy-mode models to the new spoken language (rebuilt only if it changed)
+        initializeSpeechRecognizer()
     }
 
     fun setTargetLanguage(lang: SupportedLanguage) {
+        _packMissingMessage.value = null
         translatorEngine.setTargetLanguage(lang)
     }
 
     fun swapLanguages() {
+        _packMissingMessage.value = null
         translatorEngine.swapLanguages()
+        // The spoken language changed: re-lock phrase models to it, as setSourceLanguage does
+        initializeSpeechRecognizer()
     }
 
     fun clearHistory() {
