@@ -1,5 +1,6 @@
 package com.example.overlay
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 
 enum class OverlayTheme(
@@ -53,6 +54,8 @@ enum class OverlayTheme(
     )
 }
 
+// All fields are vals of stable types; marking it lets Compose skip DraggableSubtitleBox when unchanged
+@Immutable
 data class OverlaySettings(
     val theme: OverlayTheme = OverlayTheme.CINEMA_DARK,
     val fontSizeSp: Float = 17f,

@@ -46,6 +46,9 @@ class AudioCaptureService : Service() {
     private var translationPersistJob: Job? = null
 
     private var mediaProjection: MediaProjection? = null
+    // Kept so ACTION_SWITCH_TO_MIC can unregister it; otherwise stopping the projection
+    // fires onStop(), which would tear down the new mic capture too
+    private var projectionCallback: MediaProjection.Callback? = null
     private var audioRecord: AudioRecord? = null
     @Volatile private var isCapturing = false
     private var wakeLock: PowerManager.WakeLock? = null
@@ -71,6 +74,9 @@ class AudioCaptureService : Service() {
         // AudioRecord (~43 ms at 48 kHz stereo, ~256 ms at 16 kHz mono), so this holds
         // roughly 11-60 s of audio. When full, the oldest chunk is dropped to keep recent audio.
         const val AUDIO_BUFFER_CAPACITY = 256
+
+        // Seconds of pure digital silence from internal capture before suggesting the mic
+        private const val DRM_SILENCE_SECONDS = 10L
 
         // Global state for UI to observe
         private val _isServiceRunning = MutableStateFlow(false)
@@ -158,7 +164,12 @@ class AudioCaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action ?: return START_NOT_STICKY
+        val action = intent?.action
+        if (action == null) {
+            // System restart with a null intent: the MediaProjection token is gone, so don't idle
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         when (action) {
             ACTION_STOP_CAPTURE -> {
@@ -254,9 +265,26 @@ class AudioCaptureService : Service() {
                 } catch (_: Exception) {}
                 audioRecord = null
                 try {
+                    projectionCallback?.let { mediaProjection?.unregisterCallback(it) }
                     mediaProjection?.stop()
                 } catch (_: Exception) {}
+                projectionCallback = null
                 mediaProjection = null
+
+                // Android 14+ requires the foreground service type to match: switch from
+                // MEDIA_PROJECTION to MICROPHONE before recording from the mic
+                try {
+                    startForegroundForMic()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Could not switch foreground service to microphone type", e)
+                    NotificationHelper.showErrorNotification(
+                        this,
+                        "Microphone Switch Failed",
+                        "Could not switch to microphone capture: ${e.localizedMessage}"
+                    )
+                    stopCapture()
+                    return START_NOT_STICKY
+                }
 
                 // Start mic capture
                 startMicrophoneCapture()
@@ -346,14 +374,16 @@ class AudioCaptureService : Service() {
         }
 
         try {
-            projection.registerCallback(object : MediaProjection.Callback() {
+            val callback = object : MediaProjection.Callback() {
                 override fun onStop() {
                     super.onStop()
                     Log.w(TAG, "MediaProjection session terminated by user or system")
                     stopCapture()
                     stopSelf()
                 }
-            }, null)
+            }
+            projectionCallback = callback
+            projection.registerCallback(callback, null)
 
             // Setup AudioPlaybackCaptureConfiguration with USAGE_MEDIA, USAGE_GAME, USAGE_UNKNOWN
             val captureConfig = AudioPlaybackCaptureConfiguration.Builder(projection)
@@ -643,6 +673,10 @@ class AudioCaptureService : Service() {
                 }
 
                 val shortBuffer = ShortArray(4096)
+                // DRM detection: count raw stereo samples of pure digital silence (internal capture only).
+                // Checked before the noise gate and boost, which change ordinary quiet audio.
+                val drmSilenceSampleLimit = sampleRate.toLong() * 2 * DRM_SILENCE_SECONDS
+                var consecutiveSilentSamples = 0L
                 // One resampler per capture: it carries filter state across buffers
                 val resampler = StreamingResampler(inRate = sampleRate, outRate = 16000)
                 voiceIsolationProcessor.reset()
@@ -671,6 +705,21 @@ class AudioCaptureService : Service() {
                     while (isCapturing && isActive) {
                         val readShorts = record.read(shortBuffer, 0, shortBuffer.size)
                         if (readShorts > 0) {
+                            if (isStereo) {
+                                if (AudioUtils.isDigitalSilence(shortBuffer, readShorts)) {
+                                    consecutiveSilentSamples += readShorts
+                                    if (consecutiveSilentSamples >= drmSilenceSampleLimit && !_isDrmSilenceDetected.value) {
+                                        Log.w(TAG, "No app audio for ${DRM_SILENCE_SECONDS}s of internal capture; playback may be DRM-protected")
+                                        _isDrmSilenceDetected.value = true
+                                    }
+                                } else {
+                                    consecutiveSilentSamples = 0L
+                                    if (_isDrmSilenceDetected.value) {
+                                        _isDrmSilenceDetected.value = false
+                                    }
+                                }
+                            }
+
                             // Downmix stereo to mono floats, then resample to 16 kHz with anti-aliasing
                             val floatSamples = resampler.process(
                                 AudioUtils.toMonoFloats(shortBuffer, readShorts, isStereo)
@@ -780,6 +829,7 @@ class AudioCaptureService : Service() {
             mediaProjection?.stop()
         } catch (_: Exception) {}
         mediaProjection = null
+        projectionCallback = null
 
         _liveAudioDb.value = 0f
         _isDrmSilenceDetected.value = false

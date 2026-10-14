@@ -12,7 +12,8 @@ interface TranscriptDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(transcript: TranscriptEntity): Long
 
-    @Query("SELECT * FROM transcripts ORDER BY timestamp DESC")
+    // Newest first, capped so the UI never loads an unbounded list
+    @Query("SELECT * FROM transcripts ORDER BY timestamp DESC LIMIT 500")
     fun getAllTranscripts(): Flow<List<TranscriptEntity>>
 
     @Query("DELETE FROM transcripts")

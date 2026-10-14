@@ -132,4 +132,18 @@ object AudioUtils {
         val normalized = ((db + 60.0) / 60.0).toFloat().coerceIn(0f, 1f)
         return normalized * 100f
     }
+
+    /**
+     * True if every raw PCM sample is within ±1 of zero: pure digital silence, as returned by
+     * playback capture when the playing app blocks it (DRM/FLAG_SECURE). Unlike the noise gate,
+     * this does not flag quiet-but-real audio. A paused player also yields digital silence,
+     * so treat a long run of it as a hint, not proof.
+     */
+    fun isDigitalSilence(pcmBuffer: ShortArray, readShorts: Int): Boolean {
+        for (i in 0 until readShorts.coerceAtMost(pcmBuffer.size)) {
+            val sample = pcmBuffer[i].toInt()
+            if (sample > 1 || sample < -1) return false
+        }
+        return true
+    }
 }

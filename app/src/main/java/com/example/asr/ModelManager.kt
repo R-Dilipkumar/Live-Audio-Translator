@@ -567,6 +567,7 @@ class ModelManager(private val context: Context) {
                 return@withContext
             }
 
+            requireHttpsUrl(model.downloadUrl)
             report(ModelDownloadState.Downloading(0, model.totalSizeBytes, 0f))
 
             val request = Request.Builder()
@@ -688,6 +689,14 @@ class ModelManager(private val context: Context) {
         refreshAvailableStorage()
         checkCurrentModelStatus()
         success
+    }
+
+    /**
+     * Extracted model files are loaded by native code, so only fetch archives over HTTPS.
+     * Throws IllegalArgumentException, which downloadModel() reports as an error state.
+     */
+    private fun requireHttpsUrl(url: String) {
+        require(url.startsWith("https://", ignoreCase = true)) { "Insecure model download URL (HTTPS required): $url" }
     }
 
     private fun isZipFile(file: File): Boolean {

@@ -89,7 +89,6 @@ fun MainScreen(
     modifier: Modifier = Modifier
 ) {
     val isCapturing by viewModel.isCapturing.collectAsStateWithLifecycle()
-    val audioDb by viewModel.audioLevelDb.collectAsStateWithLifecycle()
     val sourceLang by viewModel.sourceLanguage.collectAsStateWithLifecycle()
     val targetLang by viewModel.targetLanguage.collectAsStateWithLifecycle()
     val availableLanguages = viewModel.availableLanguages
@@ -436,7 +435,7 @@ fun MainScreen(
                     // Audio Visualizer VU Meter
                     AudioVisualizer(
                         isCapturing = isCapturing,
-                        audioDb = audioDb
+                        audioDbFlow = viewModel.audioLevelDb
                     )
 
                     Spacer(modifier = Modifier.height(6.dp))

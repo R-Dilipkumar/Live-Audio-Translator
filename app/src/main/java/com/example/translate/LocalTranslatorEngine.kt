@@ -686,8 +686,14 @@ class LocalTranslatorEngine(private val context: Context) {
             "再见" to "Goodbye"
         )
 
-        val srcCode = sourceLang.lowercase().take(2)
-        val tgtCode = targetLang.lowercase().take(2)
+        // Accept the "auto (ja)" label used for Auto-Detect results: use the code inside, not "au"
+        val normalizedSource = if (sourceLang.startsWith("auto (", ignoreCase = true)) {
+            sourceLang.substringAfter("(").substringBefore(")").trim()
+        } else {
+            sourceLang.trim()
+        }
+        val srcCode = normalizedSource.lowercase().take(2)
+        val tgtCode = targetLang.trim().lowercase().take(2)
 
         if (srcCode == tgtCode) return trimmed
 

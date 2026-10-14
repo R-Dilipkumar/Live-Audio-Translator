@@ -19,14 +19,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.sin
 
+/**
+ * The level updates ~25-50 times a second, so it is collected here rather than by the caller:
+ * only these bars recompose at that rate, not the whole screen.
+ */
 @Composable
 fun AudioVisualizer(
     isCapturing: Boolean,
-    audioDb: Float,
+    audioDbFlow: StateFlow<Float>,
     modifier: Modifier = Modifier
 ) {
+    val audioDb by audioDbFlow.collectAsStateWithLifecycle()
     val barCount = 18
     val normalizedDb = (audioDb / 100f).coerceIn(0f, 1f)
 

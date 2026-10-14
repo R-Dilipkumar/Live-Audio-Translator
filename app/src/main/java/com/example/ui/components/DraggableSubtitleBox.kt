@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
@@ -433,6 +434,53 @@ fun DraggableSubtitleBox(
                     }
                 }
 
+                // DRM warning: internal capture has returned pure silence for a while
+                AnimatedVisibility(visible = isDrmSilenceDetected) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.92f))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("drm_silence_warning_banner"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.WarningAmber,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "No app audio. It may be DRM-protected.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                maxLines = 2
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Button(
+                            onClick = onSwitchToMic,
+                            modifier = Modifier
+                                .height(26.dp)
+                                .testTag("switch_to_mic_button"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = null,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Use Mic", fontSize = 10.sp)
+                        }
+                    }
+                }
 
                 // Subtitle Display Area with Smooth Alpha Fade (graphicsLayer)
                 Column(
@@ -447,7 +495,7 @@ fun DraggableSubtitleBox(
                         Shadow(
                             color = if (theme == OverlayTheme.FROST_CLEAN) Color.Black.copy(alpha = 0.55f) else Color.Black.copy(alpha = 0.85f),
                             offset = Offset(1.5f, 1.5f),
-                            blurRadius = 3f
+                            blurRadius = settings.textShadowRadius.coerceAtLeast(1f)
                         )
                     } else {
                         Shadow.None

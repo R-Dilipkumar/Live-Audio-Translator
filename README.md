@@ -42,7 +42,7 @@ Test builds are signed with a debug key, so Android may warn that the developer 
 4. **Start.** Choose **Internal** (audio from other apps) or **Mic**, press **Start**, and allow screen/audio capture when Android asks.
 5. **Open the overlay.** Press **Launch Overlay** to show subtitles on top of other apps. Drag it anywhere; use the gear icon for size, lines and theme.
 
-Some apps block audio capture (DRM-protected video, for example); LiveSub then receives only silence.
+Some apps block audio capture (DRM-protected video, for example); LiveSub then receives only silence. After about 10 seconds of that, the overlay shows a warning with a **Use Mic** button that switches to the microphone.
 
 ## Features
 
@@ -100,7 +100,7 @@ git clone https://github.com/R-Dilipkumar/LiveSub-Offline-Translator.git
 cd LiveSub-Offline-Translator
 ```
 
-Create `local.properties` with `sdk.dir=<path to your Android SDK>`. Debug builds are signed with `debug.keystore` in the project root (not in the repository), so create one first, for example with `keytool -genkeypair -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -validity 10000 -dname "CN=Android Debug"`.
+Create `local.properties` with `sdk.dir=<path to your Android SDK>`. Debug builds are signed with `debug.keystore` in the project root if it exists (it is not in the repository); otherwise Android's default debug key is used. To make one: `keytool -genkeypair -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -validity 10000 -dname "CN=Android Debug"`.
 
 ```bash
 ./gradlew assembleDebug              # app/build/outputs/apk/debug/app-debug.apk
@@ -122,9 +122,9 @@ Release builds read `KEYSTORE_PATH`, `STORE_PASSWORD` and `KEY_PASSWORD` from en
 ## Privacy
 
 - Audio, transcripts and translations are processed on the phone and are not uploaded.
-- The internet is used to download models and language packs.
+- The internet is used to download models (HTTPS only) and language packs. The app has no cloud or analytics SDKs of its own.
 - Google ML Kit may send anonymous usage statistics to Google, as described in its terms.
-- History is stored on the phone until you clear it.
+- History is stored on the phone until you clear it. It is left out of Android cloud backups, and downloaded models are left out of backups and device transfers.
 
 ## Contributing
 

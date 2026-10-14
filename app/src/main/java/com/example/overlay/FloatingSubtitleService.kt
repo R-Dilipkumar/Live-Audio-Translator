@@ -228,6 +228,8 @@ class FloatingSubtitleService : Service() {
         val lifecycleOwner = overlayLifecycleOwner ?: return
 
         val composeView = ComposeView(this).apply {
+            // Tapjacking guard: ignore touches while another window obscures the overlay
+            filterTouchesWhenObscured = true
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
         }
 

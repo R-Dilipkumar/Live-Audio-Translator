@@ -46,7 +46,10 @@ data class AppSettings(
     val textShadowRadius: Float = 4.0f
 )
 
-class SettingsRepository(private val context: Context) {
+class SettingsRepository(context: Context) {
+
+    // Hold the application context so a repository created from a Service or Activity never keeps it alive
+    private val appContext: Context = context.applicationContext ?: context
 
     companion object {
         private const val SETTINGS_VERSION = 3
@@ -74,7 +77,7 @@ class SettingsRepository(private val context: Context) {
         val KEY_TEXT_SHADOW_RADIUS = floatPreferencesKey("pref_text_shadow_radius")
     }
 
-    val settingsFlow: Flow<AppSettings> = context.dataStore.data.map { preferences ->
+    val settingsFlow: Flow<AppSettings> = appContext.dataStore.data.map { preferences ->
         val d = AppSettings()
         AppSettings(
             isVoiceIsolationEnabled = preferences[PreferencesKeys.KEY_VOICE_ISOLATION] ?: d.isVoiceIsolationEnabled,
@@ -99,75 +102,75 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun updateVoiceIsolation(enabled: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_VOICE_ISOLATION] = enabled }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_VOICE_ISOLATION] = enabled }
     }
 
     suspend fun updateQuietVoiceBoost(enabled: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_QUIET_BOOST] = enabled }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_QUIET_BOOST] = enabled }
     }
 
     suspend fun updateDebugAudioRecording(enabled: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_DEBUG_RECORD] = enabled }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_DEBUG_RECORD] = enabled }
     }
 
     suspend fun updateNoSpeechRestartDelay(seconds: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_NO_SPEECH_RESTART] = seconds }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_NO_SPEECH_RESTART] = seconds }
     }
 
     suspend fun updateMinSentenceLength(seconds: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_MIN_SENTENCE] = seconds }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_MIN_SENTENCE] = seconds }
     }
 
     suspend fun updateSingleCharacterMode(mode: Int) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_SINGLE_CHAR_MODE] = mode }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_SINGLE_CHAR_MODE] = mode }
     }
 
     suspend fun updateNoiseGateThreshold(threshold: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_NOISE_GATE] = threshold }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_NOISE_GATE] = threshold }
     }
 
     suspend fun updateSilenceEndpointDelay(delay: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_ENDPOINT_DELAY] = delay }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_ENDPOINT_DELAY] = delay }
     }
 
     suspend fun updateMaxUtteranceWindow(window: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_MAX_UTTERANCE] = window }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_MAX_UTTERANCE] = window }
     }
 
     suspend fun updateLanguageIdConfidence(confidence: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_LANG_CONFIDENCE] = confidence }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_LANG_CONFIDENCE] = confidence }
     }
 
     suspend fun updateAntiFreezeWatchdog(enabled: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_ANTI_FREEZE] = enabled }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_ANTI_FREEZE] = enabled }
     }
 
     suspend fun updateSubtitleLingerTime(seconds: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_LINGER_TIME] = seconds }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_LINGER_TIME] = seconds }
     }
 
     suspend fun updateOverlayOpacity(opacity: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_OPACITY] = opacity }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_OPACITY] = opacity }
     }
 
     suspend fun updateFontSize(sizeSp: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_FONT_SIZE] = sizeSp }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_FONT_SIZE] = sizeSp }
     }
 
     suspend fun updateMaxDisplayLines(lines: Int) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_MAX_LINES] = lines }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_MAX_LINES] = lines }
     }
 
     suspend fun updateShowOriginalSpeech(show: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_SHOW_ORIGINAL] = show }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_SHOW_ORIGINAL] = show }
     }
 
     suspend fun updateTextOutlineShadow(enabled: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_TEXT_OUTLINE_SHADOW] = enabled }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_TEXT_OUTLINE_SHADOW] = enabled }
     }
 
     suspend fun updateTextShadowRadius(radius: Float) {
-        context.dataStore.edit { it[PreferencesKeys.KEY_TEXT_SHADOW_RADIUS] = radius }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_TEXT_SHADOW_RADIUS] = radius }
     }
 
     /**
@@ -175,15 +178,15 @@ class SettingsRepository(private val context: Context) {
      * filter). Resets the developer settings once so existing installs get the tuned defaults.
      */
     suspend fun applyTunedDefaultsOnce() {
-        val alreadyApplied = context.dataStore.data.first()[PreferencesKeys.KEY_SETTINGS_VERSION] ?: 0
+        val alreadyApplied = appContext.dataStore.data.first()[PreferencesKeys.KEY_SETTINGS_VERSION] ?: 0
         if (alreadyApplied >= SETTINGS_VERSION) return
         resetDeveloperDefaults()
-        context.dataStore.edit { it[PreferencesKeys.KEY_SETTINGS_VERSION] = SETTINGS_VERSION }
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_SETTINGS_VERSION] = SETTINGS_VERSION }
     }
 
     /** Resets the user-facing subtitle settings. Developer settings are left as they are. */
     suspend fun resetUserDefaults() {
-        context.dataStore.edit { preferences ->
+        appContext.dataStore.edit { preferences ->
             listOf(
                 PreferencesKeys.KEY_LINGER_TIME,
                 PreferencesKeys.KEY_OPACITY,
@@ -196,7 +199,7 @@ class SettingsRepository(private val context: Context) {
 
     /** Resets the developer settings (audio, recognition, text rendering) to the tuned defaults. */
     suspend fun resetDeveloperDefaults() {
-        context.dataStore.edit { preferences ->
+        appContext.dataStore.edit { preferences ->
             listOf(
                 PreferencesKeys.KEY_VOICE_ISOLATION,
                 PreferencesKeys.KEY_QUIET_BOOST,
