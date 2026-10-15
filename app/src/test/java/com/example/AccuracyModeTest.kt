@@ -9,6 +9,9 @@ import com.example.asr.RecognitionMode
 import com.example.translate.SupportedLanguage
 import com.example.ui.languageHelp
 import com.example.ui.understands
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -173,9 +176,14 @@ class AccuracyModeTest {
         )
     }
 
+    /** A manager whose start-up check (which also clears the crash marker) has finished. */
+    private fun startedManager(): ModelManager = ModelManager(context).also { manager ->
+        runBlocking { withTimeout(10_000) { manager.hasScannedModels.first { it } } }
+    }
+
     @Test
     fun modelThatLoadedFineIsKept() {
-        val manager = ModelManager(context)
+        val manager = startedManager()
         val dir = installFakeSenseVoice(manager)
         manager.beginNativeLoad(ModelManager.DEFAULT_ACCURATE_MODEL_ID)
         manager.endNativeLoad()
@@ -186,7 +194,8 @@ class AccuracyModeTest {
 
     @Test
     fun modelThatCrashedTheAppWhileLoadingIsRemoved() {
-        val manager = ModelManager(context)
+        // Waits for the start-up check, so it can't take the crash marker first
+        val manager = startedManager()
         val dir = installFakeSenseVoice(manager)
         // The app died inside the native load: the marker was never cleared
         manager.beginNativeLoad(ModelManager.DEFAULT_ACCURATE_MODEL_ID)

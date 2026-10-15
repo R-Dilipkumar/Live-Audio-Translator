@@ -116,12 +116,26 @@ private fun UserSettings(
                 tag = "slider_font_size"
             ) { scope.launch { repo.updateFontSize(it) } }
 
-            ChoiceSetting(
+            SliderSetting(
                 title = "Lines shown",
-                options = listOf(1 to "1", 2 to "2", 3 to "3", 4 to "4"),
-                selected = settings.maxDisplayLines,
-                tagPrefix = "chip_max_lines_"
-            ) { scope.launch { repo.updateMaxDisplayLines(it) } }
+                value = settings.maxDisplayLines.toFloat(),
+                valueText = "${settings.maxDisplayLines}",
+                range = 1f..com.example.overlay.MAX_OVERLAY_LINES.toFloat(),
+                steps = com.example.overlay.MAX_OVERLAY_LINES - 2,
+                tag = "slider_max_lines",
+                subtitle = "You can also drag the corner of the floating subtitles: sideways for width, up or down for lines."
+            ) { value ->
+                val lines = kotlin.math.round(value).toInt()
+                if (lines != settings.maxDisplayLines) scope.launch { repo.updateMaxDisplayLines(lines) }
+            }
+
+            ChoiceSetting(
+                title = "Scroll-back limit",
+                subtitle = "Roll-up style: how many past subtitles you can scroll back to.",
+                options = com.example.overlay.ROLL_UP_HISTORY_CHOICES.map { it to "$it" },
+                selected = settings.rollUpHistory,
+                tagPrefix = "chip_roll_up_history_"
+            ) { scope.launch { repo.updateRollUpHistory(it) } }
 
             ChoiceSetting(
                 title = "Subtitle style",

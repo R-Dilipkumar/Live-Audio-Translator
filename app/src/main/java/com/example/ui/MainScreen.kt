@@ -241,6 +241,7 @@ private fun TranslateTab(
     val speechModel by viewModel.selectedAsrModel.collectAsStateWithLifecycle()
     val latencyMode by viewModel.recognitionMode.collectAsStateWithLifecycle()
     val packWarning by viewModel.translationPackWarning.collectAsStateWithLifecycle()
+    val modelTooSlow by viewModel.isSpeechModelTooSlow.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -249,6 +250,12 @@ private fun TranslateTab(
     ) {
         if (!isModelInstalled) {
             SetupCard(onOpenModels = onOpenModels)
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        // The phrase model falls behind live speech on this phone: suggest a faster one
+        if (isCapturing && modelTooSlow) {
+            SlowModelCard(modelName = speechModel.name, onOpenModels = onOpenModels)
             Spacer(modifier = Modifier.height(10.dp))
         }
 
@@ -374,6 +381,38 @@ private fun SpeechModelLine(
                 fontWeight = if (help.isWarning) FontWeight.SemiBold else FontWeight.Normal,
                 modifier = Modifier.padding(top = 4.dp, start = 28.dp)
             )
+        }
+    }
+}
+
+/** The speech model takes longer than the speech itself, so subtitles lag and speech is skipped. */
+@Composable
+private fun SlowModelCard(modelName: String, onOpenModels: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("speech_model_too_slow_card"),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+    ) {
+        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.GraphicEq, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "$modelName is too slow for this phone",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+                Text(
+                    text = "Subtitles fall behind and some speech is skipped. Try a faster model " +
+                        "(Whisper Base, SenseVoice or Moonshine) or the Instant latency.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+            }
+            TextButton(onClick = onOpenModels) { Text("Models") }
         }
     }
 }

@@ -117,6 +117,9 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
 
     val livePartialSpeech: StateFlow<String> = speechEngine.partialTextFlow
 
+    // The chosen phrase model can't keep up on this phone (shown as a warning while capturing)
+    val isSpeechModelTooSlow: StateFlow<Boolean> = speechEngine.isFallingBehind
+
     // Floating overlay window state
     val isFloatingOverlayActive: StateFlow<Boolean> = com.example.overlay.FloatingSubtitleService.isOverlayActive
 
@@ -222,7 +225,8 @@ class AudioTranslatorViewModel(application: Application) : AndroidViewModel(appl
                     isTextOutlineShadowEnabled = settings.isTextOutlineShadowEnabled,
                     textShadowRadius = settings.textShadowRadius,
                     style = com.example.overlay.SubtitleStyle.fromCode(settings.subtitleStyle),
-                    widthDp = settings.overlayWidthDp
+                    widthDp = settings.overlayWidthDp,
+                    rollUpHistory = settings.rollUpHistory
                 )
                 FloatingSubtitleService.updateSettings(updatedFloating)
             }

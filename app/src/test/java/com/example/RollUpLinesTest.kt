@@ -1,7 +1,7 @@
 package com.example
 
 import com.example.overlay.SubtitleStyle
-import com.example.ui.components.ROLL_UP_HISTORY
+import com.example.overlay.DEFAULT_ROLL_UP_HISTORY
 import com.example.ui.components.RollLine
 import com.example.ui.components.updateRollLines
 import org.junit.Assert.assertEquals
@@ -33,9 +33,24 @@ class RollUpLinesTest {
     @Test
     fun historyIsCappedSoScrollingBackStaysLight() {
         var lines = emptyList<RollLine>()
-        for (id in 1L..(ROLL_UP_HISTORY + 10L)) lines = updateRollLines(lines, id, "Line $id", isFinal = true)
-        assertEquals(ROLL_UP_HISTORY, lines.size)
-        assertEquals("Line ${ROLL_UP_HISTORY + 10}", lines.last().text)
+        for (id in 1L..(DEFAULT_ROLL_UP_HISTORY + 10L)) lines = updateRollLines(lines, id, "Line $id", isFinal = true)
+        assertEquals(DEFAULT_ROLL_UP_HISTORY, lines.size)
+        assertEquals("Line ${DEFAULT_ROLL_UP_HISTORY + 10}", lines.last().text)
+    }
+
+    @Test
+    fun scrollBackLimitIsTheUsersChoice() {
+        var lines = emptyList<RollLine>()
+        for (id in 1L..30L) lines = updateRollLines(lines, id, "Line $id", isFinal = true, limit = 10)
+        assertEquals(10, lines.size)
+        assertEquals("Line 21", lines.first().text)
+        // A draft growing in place doesn't push anything out
+        lines = updateRollLines(lines, 31, "Line", isFinal = false, limit = 10)
+        lines = updateRollLines(lines, 31, "Line 31", isFinal = false, limit = 10)
+        assertEquals(10, lines.size)
+        assertEquals("Line 31", lines.last().text)
+        // A nonsense limit still keeps the newest line
+        assertEquals(1, updateRollLines(lines, 32, "Line 32", isFinal = true, limit = 0).size)
     }
 
     @Test

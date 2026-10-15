@@ -30,6 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Locale
 
 
 data class SupportedLanguage(
@@ -52,6 +53,43 @@ data class TranslationResult(
     val status: TranslationStatus = TranslationStatus.TRANSLATED
 )
 
+/** Every language ML Kit can translate, sorted by English name. */
+fun allTranslatableLanguages(): List<SupportedLanguage> =
+    TranslateLanguage.getAllLanguages()
+        .map { code -> SupportedLanguage(code, languageDisplayName(code), flagFor(code)) }
+        .sortedBy { it.displayName }
+
+/**
+ * English name of a language code, as shown in the dropdowns. Also used to match the speech
+ * model catalog's language names, so a few names newer Java versions changed are pinned here.
+ */
+fun languageDisplayName(code: String): String = when (code) {
+    TranslateLanguage.CHINESE -> "Chinese"
+    TranslateLanguage.BENGALI -> "Bengali"
+    TranslateLanguage.HAITIAN_CREOLE -> "Haitian Creole"
+    TranslateLanguage.TAGALOG -> "Tagalog (Filipino)"
+    else -> Locale.forLanguageTag(code).getDisplayLanguage(Locale.ENGLISH).ifBlank { code }
+}
+
+// A country commonly linked to each language, for the flag shown next to it
+private val LANGUAGE_COUNTRY = mapOf(
+    "af" to "ZA", "ar" to "SA", "be" to "BY", "bg" to "BG", "bn" to "BD", "ca" to "AD", "cs" to "CZ",
+    "cy" to "GB", "da" to "DK", "de" to "DE", "el" to "GR", "en" to "US", "es" to "ES", "et" to "EE",
+    "fa" to "IR", "fi" to "FI", "fr" to "FR", "ga" to "IE", "gl" to "ES", "gu" to "IN", "he" to "IL",
+    "hi" to "IN", "hr" to "HR", "ht" to "HT", "hu" to "HU", "id" to "ID", "is" to "IS", "it" to "IT",
+    "ja" to "JP", "ka" to "GE", "kn" to "IN", "ko" to "KR", "lt" to "LT", "lv" to "LV", "mk" to "MK",
+    "mr" to "IN", "ms" to "MY", "mt" to "MT", "nl" to "NL", "no" to "NO", "pl" to "PL", "pt" to "BR",
+    "ro" to "RO", "ru" to "RU", "sk" to "SK", "sl" to "SI", "sq" to "AL", "sv" to "SE", "sw" to "KE",
+    "ta" to "IN", "te" to "IN", "th" to "TH", "tl" to "PH", "tr" to "TR", "uk" to "UA", "ur" to "PK",
+    "vi" to "VN", "zh" to "CN"
+)
+
+/** Flag emoji for a language (a globe when no single country fits, e.g. Esperanto). */
+fun flagFor(code: String): String {
+    val country = LANGUAGE_COUNTRY[code] ?: return "🌐"
+    return country.map { String(Character.toChars(0x1F1E6 + (it - 'A'))) }.joinToString("")
+}
+
 class LocalTranslatorEngine(private val context: Context) {
 
     companion object {
@@ -70,21 +108,9 @@ class LocalTranslatorEngine(private val context: Context) {
     }
     val autoDetectLanguage = SupportedLanguage("auto", "Auto-Detect", "🌐", isAutoDetect = true)
 
-    val availableLanguages = listOf(
-        autoDetectLanguage,
-        SupportedLanguage(TranslateLanguage.ENGLISH, "English", "🇺🇸"),
-        SupportedLanguage(TranslateLanguage.SPANISH, "Spanish", "🇪🇸"),
-        SupportedLanguage(TranslateLanguage.CHINESE, "Chinese", "🇨🇳"),
-        SupportedLanguage(TranslateLanguage.JAPANESE, "Japanese", "🇯🇵"),
-        SupportedLanguage(TranslateLanguage.KOREAN, "Korean", "🇰🇷"),
-        SupportedLanguage(TranslateLanguage.FRENCH, "French", "🇫🇷"),
-        SupportedLanguage(TranslateLanguage.GERMAN, "German", "🇩🇪"),
-        SupportedLanguage(TranslateLanguage.HINDI, "Hindi", "🇮🇳"),
-        SupportedLanguage(TranslateLanguage.ITALIAN, "Italian", "🇮🇹"),
-        SupportedLanguage(TranslateLanguage.PORTUGUESE, "Portuguese", "🇧🇷"),
-        SupportedLanguage(TranslateLanguage.RUSSIAN, "Russian", "🇷🇺"),
-        SupportedLanguage(TranslateLanguage.ARABIC, "Arabic", "🇸🇦")
-    )
+    // Auto-Detect, then every language ML Kit can translate (Tamil, Telugu, Bengali, ...).
+    // Speech models understand fewer; the main screen says when the chosen one can't.
+    val availableLanguages: List<SupportedLanguage> = listOf(autoDetectLanguage) + allTranslatableLanguages()
 
     // Language list excluding Auto-Detect for target language selection
     val targetAvailableLanguages = availableLanguages.filter { !it.isAutoDetect }

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.lazy.LazyColumn
@@ -90,11 +91,10 @@ import com.example.overlay.OverlayTheme
 import com.example.overlay.SubtitleFrame
 import com.example.overlay.SubtitleLayout
 import com.example.overlay.SubtitlePager
+import com.example.overlay.MAX_OVERLAY_LINES
+import com.example.overlay.ROLL_UP_HISTORY_CHOICES
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-
-/** Most subtitle lines the window can be resized to. */
-const val MAX_OVERLAY_LINES = 4
 
 /**
  * The floating subtitle window drawn over other apps by FloatingSubtitleService.
@@ -267,7 +267,7 @@ fun SubtitleOverlay(
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .size(30.dp)
+                    .size(36.dp)
                     .pointerInput(lineHeightPx) {
                         var verticalTravel = 0f
                         detectDragGestures(
@@ -298,10 +298,10 @@ fun SubtitleOverlay(
             ) {
                 Icon(
                     imageVector = Icons.Default.OpenInFull,
-                    contentDescription = "Resize",
-                    tint = theme.textColor.copy(alpha = 0.45f),
+                    contentDescription = "Resize: drag sideways for width, up or down for lines",
+                    tint = theme.textColor.copy(alpha = 0.7f),
                     modifier = Modifier
-                        .size(14.dp)
+                        .size(18.dp)
                         .graphicsLayer { rotationZ = 90f }
                 )
             }
@@ -431,6 +431,11 @@ private fun SubtitleContent(
 
     // Roll-up style: recent sentences, oldest first; the newest may still be a draft
     var rollLines by remember { mutableStateOf(listOf<RollLine>()) }
+    // A smaller scroll-back limit applies at once, not only when the next line arrives
+    LaunchedEffect(settings.rollUpHistory) {
+        val limit = settings.rollUpHistory.coerceAtLeast(1)
+        if (rollLines.size > limit) rollLines = rollLines.takeLast(limit)
+    }
 
     // Movie style: utterances queue up and are shown as cards that hold for reading.
     // Accuracy mode: phrases arrive a little later, so each card stays up longer
@@ -460,7 +465,7 @@ private fun SubtitleContent(
         subtitlePager.submit(utteranceId, text, isTranslatedFinal, System.currentTimeMillis())
         pagerVersion++
 
-        rollLines = updateRollLines(rollLines, utteranceId, text, isTranslatedFinal)
+        rollLines = updateRollLines(rollLines, utteranceId, text, isTranslatedFinal, settings.rollUpHistory)
 
         if (utteranceId >= currentActiveEpoch) currentActiveEpoch = utteranceId
         if (isTranslatedFinal) {
@@ -642,13 +647,31 @@ private fun OverlaySettingsPanel(
             }
         }
 
+        val lines = settings.maxSubtitleLines.coerceIn(1, MAX_OVERLAY_LINES)
         PanelRow(label = "Lines") {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (count in 1..MAX_OVERLAY_LINES) {
-                    PillButton(text = "$count", selected = settings.maxSubtitleLines == count, tag = "lines_${count}_button") {
-                        onSettingsChanged(settings.copy(maxSubtitleLines = count, maxLines = count))
-                    }
-                }
+            Stepper(
+                value = "$lines",
+                tag = "lines",
+                canDecrease = lines > 1,
+                canIncrease = lines < MAX_OVERLAY_LINES,
+                onDecrease = { onSettingsChanged(settings.copy(maxSubtitleLines = lines - 1, maxLines = lines - 1)) },
+                onIncrease = { onSettingsChanged(settings.copy(maxSubtitleLines = lines + 1, maxLines = lines + 1)) }
+            )
+        }
+
+        // How far back you can scroll (Roll-up is the only style that scrolls)
+        if (settings.style == SubtitleStyle.ROLL_UP) {
+            val choices = ROLL_UP_HISTORY_CHOICES
+            val index = choices.indexOfFirst { it >= settings.rollUpHistory }.takeIf { it >= 0 } ?: choices.lastIndex
+            PanelRow(label = "Scroll back") {
+                Stepper(
+                    value = "${choices[index]} lines",
+                    tag = "history",
+                    canDecrease = index > 0,
+                    canIncrease = index < choices.lastIndex,
+                    onDecrease = { onSettingsChanged(settings.copy(rollUpHistory = choices[index - 1])) },
+                    onIncrease = { onSettingsChanged(settings.copy(rollUpHistory = choices[index + 1])) }
+                )
             }
         }
 
@@ -737,6 +760,32 @@ private fun PanelRow(label: String, content: @Composable () -> Unit) {
     }
 }
 
+/** "−  value  +": fits however narrow the window is resized. */
+@Composable
+private fun Stepper(
+    value: String,
+    tag: String,
+    canDecrease: Boolean,
+    canIncrease: Boolean,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        PillButton(text = "−", selected = false, tag = "${tag}_decrease_button") { if (canDecrease) onDecrease() }
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .widthIn(min = 36.dp)
+                .padding(horizontal = 6.dp)
+                .testTag("${tag}_value")
+        )
+        PillButton(text = "+", selected = false, tag = "${tag}_increase_button") { if (canIncrease) onIncrease() }
+    }
+}
+
 @Composable
 private fun PillButton(text: String, selected: Boolean, tag: String, onClick: () -> Unit) {
     Box(
@@ -764,15 +813,19 @@ private fun PillButton(text: String, selected: Boolean, tag: String, onClick: ()
 /** One sentence in Roll-up style. [id] is the utterance id, so a draft and its final share a line. */
 internal data class RollLine(val id: Long, val text: String, val isFinal: Boolean)
 
-/** Most sentences kept for scrolling back in Roll-up style. */
-internal const val ROLL_UP_HISTORY = 60
-
 /**
  * Applies one translation result to the Roll-up lines (oldest first). A draft or final of the
  * newest utterance replaces it in place; a newer utterance adds a line; a late final for an
  * older line updates that line. A draft never replaces a final.
  */
-internal fun updateRollLines(lines: List<RollLine>, utteranceId: Long, text: String, isFinal: Boolean): List<RollLine> {
+internal fun updateRollLines(
+    lines: List<RollLine>,
+    utteranceId: Long,
+    text: String,
+    isFinal: Boolean,
+    // Past lines kept for scrolling back (the setting); older ones are dropped
+    limit: Int = com.example.overlay.DEFAULT_ROLL_UP_HISTORY
+): List<RollLine> {
     val index = lines.indexOfLast { it.id == utteranceId }
     if (index >= 0) {
         val existing = lines[index]
@@ -782,7 +835,7 @@ internal fun updateRollLines(lines: List<RollLine>, utteranceId: Long, text: Str
     val newest = lines.lastOrNull()
     // An older utterance that is no longer on the list: too late to show
     if (newest != null && utteranceId in 1 until newest.id) return lines
-    return (lines + RollLine(utteranceId, text, isFinal)).takeLast(ROLL_UP_HISTORY)
+    return (lines + RollLine(utteranceId, text, isFinal)).takeLast(limit.coerceAtLeast(1))
 }
 
 /**

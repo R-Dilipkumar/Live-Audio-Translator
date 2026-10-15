@@ -274,7 +274,8 @@ class FloatingSubtitleService : Service() {
                                 lingerSeconds = newSettings.lingerTimeSeconds,
                                 textShadow = newSettings.isTextOutlineShadowEnabled,
                                 textShadowRadius = newSettings.textShadowRadius,
-                                styleCode = newSettings.style.code
+                                styleCode = newSettings.style.code,
+                                rollUpHistory = newSettings.rollUpHistory
                             )
                         } catch (_: Exception) {}
                     }
@@ -299,6 +300,11 @@ class FloatingSubtitleService : Service() {
         }
 
         overlayRootView = composeView
+        // More lines make the window taller, which could push it past the bottom of the screen:
+        // nudge it back on screen whenever its height changes (moveWindowBy keeps it in bounds)
+        composeView.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) moveWindowBy(0, 0)
+        }
 
         try {
             wm.addView(composeView, params)
@@ -336,7 +342,8 @@ class FloatingSubtitleService : Service() {
                         isTextOutlineShadowEnabled = appSettings.isTextOutlineShadowEnabled,
                         textShadowRadius = appSettings.textShadowRadius,
                         style = SubtitleStyle.fromCode(appSettings.subtitleStyle),
-                        widthDp = appSettings.overlayWidthDp
+                        widthDp = appSettings.overlayWidthDp,
+                        rollUpHistory = appSettings.rollUpHistory
                     )
                     // Apply a saved width (e.g. on first show), unless the user is resizing right now
                     if (!isResizing && appSettings.overlayWidthDp > 0) {
