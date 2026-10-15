@@ -34,6 +34,8 @@ Get the latest APK from [Releases](https://github.com/R-Dilipkumar/LiveSub-Offli
 
 Test builds are signed with a debug key, so Android may warn that the developer is unknown.
 
+**Upgrading from v1.2.0 or older:** from v1.2.1 the app has a new package name (`io.github.rdilipkumar.livesub`), so it installs as a separate app. Uninstall the old LiveSub first; downloaded models and history don't carry over.
+
 ## How to use
 
 1. **Download a speech model.** Open the **Models** tab and download a model for the language you will listen to. For Japanese, Chinese or Korean, **SenseVoice** is the most accurate. For live word-by-word text, use **Multilingual**.

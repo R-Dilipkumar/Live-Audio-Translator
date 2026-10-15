@@ -9,11 +9,11 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.liveaudiotranslate.zqxkpv"
+    applicationId = "io.github.rdilipkumar.livesub"
     minSdk = 29
     targetSdk = 35
-    versionCode = 3
-    versionName = "1.2.0"
+    versionCode = 4
+    versionName = "1.2.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
