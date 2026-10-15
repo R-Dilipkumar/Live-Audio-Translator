@@ -97,7 +97,8 @@ class AuditFixesTest {
             lingerSeconds = 6f,
             textShadow = false,
             textShadowRadius = 2.5f,
-            styleCode = 0
+            styleCode = 0,
+            rollUpHistory = 100
         )
         val saved = repo.settingsFlow.first()
         assertEquals(23f, saved.fontSizeSp, 0.001f)
@@ -108,5 +109,6 @@ class AuditFixesTest {
         assertEquals(false, saved.isTextOutlineShadowEnabled)
         assertEquals(2.5f, saved.textShadowRadius, 0.001f)
         assertEquals(0, saved.subtitleStyle)
+        assertEquals(100, saved.rollUpHistory)
     }
 }

@@ -40,9 +40,9 @@ Test builds are signed with a debug key, so Android may warn that the developer 
 2. **Download translation packs.** In the same tab, download the pack for the spoken language and the pack for the language you read. If one is missing, the main screen tells you which.
 3. **Pick languages.** On the **Translate** tab, choose the **Spoken language** (or Auto-Detect) and **Subtitles in**. The line below shows which speech model is listening and whether it understands that language.
 4. **Start.** Choose **Phone audio** or **Microphone**, press **Start**, and allow audio capture when Android asks. The floating subtitles open by themselves (you can turn that off in Settings).
-5. **Use the floating subtitles.** Drag the top bar to move them, drag the corner to resize, and double-tap to hide the controls. The gear icon sets text size, lines, style and theme.
+5. **Use the floating subtitles.** Drag the top bar to move them, drag the corner to resize, and double-tap to hide the controls. The gear icon sets text size, lines (up to 8), how far back you can scroll, style and theme.
 
-**Preferred latency** (Settings): **Instant** uses a streaming model, so words appear while spoken. **About 1 second** uses a whole-phrase model: text appears when the speaker pauses, with punctuation and far fewer mistakes. Each latency keeps its own model.
+**Preferred latency** (Settings): **Instant** uses a streaming model, so words appear while spoken. **About 1 second** uses a whole-phrase model: text appears sentence by sentence, usually within a few seconds, with punctuation and far fewer mistakes. Each latency keeps its own model.
 
 Some apps block audio capture (DRM-protected video, for example); LiveSub then receives only silence.
 
@@ -51,14 +51,14 @@ Some apps block audio capture (DRM-protected video, for example); LiveSub then r
 - **Captures app audio or the microphone.** Internal capture uses Android's audio playback capture (Android 10+).
 - **Two kinds of speech recognition** from Sherpa-ONNX:
   - **Instant:** streaming models; words appear while they are spoken.
-  - **About 1 second:** a speech detector finds each phrase and a stronger model (SenseVoice, Moonshine, Parakeet, GigaAM or Whisper) recognizes it whole, with punctuation. Music and laughter are ignored, and the model can be locked to the spoken language.
+  - **About 1 second:** speech is cut into pieces at sentence breaks (judged from the speaker's own rhythm) or, in long non-stop speech, at a gap between words; how long a piece may get depends on how fast the model runs on your phone. A stronger model (SenseVoice, Moonshine, Parakeet, GigaAM or Whisper) recognizes each piece in the background, with punctuation. A translated draft shows right away; the whole sentence replaces it when complete. Music and laughter are ignored, and the model can be locked to the spoken language.
 - **Whole-sentence translation:** pieces split by short pauses are joined before translating, so meaning isn't cut in half.
-- **On-device translation** with Google ML Kit, including automatic detection of the spoken language.
+- **On-device translation** with Google ML Kit between 59 languages (including Tamil, Telugu, Kannada, Marathi, Bengali, Gujarati and Urdu), with automatic detection of the spoken language. For speech in Indian languages, use a Whisper model.
 - **Floating subtitles** over any app, in three styles:
   - **Roll-up:** lines stack and roll up; scroll back to reread, and it returns to live by itself.
   - **Movie:** whole cards that stay long enough to read.
   - **Live:** one line rewritten as words arrive.
-  You can resize it, show 1–4 lines, and change text size, background and themes. Double-tap hides the controls.
+  Each sentence gets its own line or card. Drag the corner to resize it (sideways for width, up or down for up to 8 lines), choose how many past subtitles you can scroll back to (10–200), and change text size, background and themes. Double-tap hides the controls.
 - **Live feed and history** in the app, saved on the phone. Tap a line to copy it.
 - **Quick Settings tile** to start and stop without opening the app.
 - **Audio clean-up tuned for speech**: rumble filter, a boost for quiet or husky voices, and an optional noise gate.
@@ -91,7 +91,7 @@ All models come from the official [Sherpa-ONNX model release](https://github.com
 | Parakeet v3 | 25 European languages | 465 MB | NVIDIA, punctuation and capitals |
 | GigaAM v3 | Russian | 162 MB | |
 | Whisper Base | 99 languages | 198 MB | Hindi, Tamil, Thai, Turkish and more |
-| Whisper Small | 99 languages | 610 MB | More accurate, slower |
+| Whisper Small | 99 languages | 610 MB | More accurate, but too slow for live speech on many phones |
 
 About-1-second models also download the Silero speech detector (under 1 MB).
 

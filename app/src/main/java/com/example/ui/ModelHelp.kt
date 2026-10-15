@@ -4,7 +4,7 @@ import com.example.asr.AsrModelConfig
 import com.example.asr.ModelManager
 import com.example.asr.RecognitionMode
 import com.example.translate.SupportedLanguage
-import java.util.Locale
+import com.example.translate.languageDisplayName
 
 /** Short name of a latency, as shown in Settings → Preferred latency. */
 fun latencyLabel(mode: RecognitionMode): String = when (mode) {
@@ -17,9 +17,9 @@ fun latencyLabel(mode: RecognitionMode): String = when (mode) {
  * list all of the model's languages (then it is not flagged).
  */
 fun AsrModelConfig.understands(code: String): Boolean? {
-    if (languageHints == ModelManager.WHISPER_ANY_LANGUAGE) return true
+    if (languageHints == ModelManager.WHISPER_ANY_LANGUAGE) return code in ModelManager.WHISPER_LANGUAGE_CODES
     if (code in languageHints || languageCode == code) return true
-    val name = Locale.forLanguageTag(code).getDisplayLanguage(Locale.ENGLISH)
+    val name = languageDisplayName(code)
     if (languages.any { it.equals(name, ignoreCase = true) }) return true
     // "and 15 more", "99 languages": the list is not complete
     if (languages.any { it.contains("more") || it.contains("languages") }) return null
@@ -29,7 +29,7 @@ fun AsrModelConfig.understands(code: String): Boolean? {
 /** Whether [model] can be told to listen for one language only (SenseVoice, Whisper). */
 fun AsrModelConfig.canLockTo(code: String): Boolean =
     mode == RecognitionMode.ACCURACY &&
-        (languageHints == ModelManager.WHISPER_ANY_LANGUAGE || code in languageHints)
+        (if (languageHints == ModelManager.WHISPER_ANY_LANGUAGE) code in ModelManager.WHISPER_LANGUAGE_CODES else code in languageHints)
 
 data class LanguageHelp(val text: String, val isWarning: Boolean)
 

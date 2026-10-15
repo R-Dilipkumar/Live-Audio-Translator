@@ -40,7 +40,9 @@ data class AppSettings(
     val subtitleLingerTimeSeconds: Float = 4.0f, // 1 to 10 s, or 0 for "until the next sentence"
     val overlayOpacity: Float = 0.9f, // 0.20 to 1.00
     val fontSizeSp: Float = 18.0f, // 12 to 26
-    val maxDisplayLines: Int = 2, // 1 to 4
+    val maxDisplayLines: Int = 2, // 1 to MAX_OVERLAY_LINES
+    // Roll-up style: past subtitles kept to scroll back to
+    val rollUpHistory: Int = com.example.overlay.DEFAULT_ROLL_UP_HISTORY,
     val showOriginalSpeech: Boolean = true,
     val subtitleStyle: Int = 1, // SubtitleStyle code: 0 movie cards, 1 roll-up, 2 live
     val isAutoOverlayEnabled: Boolean = true, // open the floating subtitles when capture starts
@@ -85,6 +87,7 @@ class SettingsRepository(context: Context) {
         val KEY_SUBTITLE_STYLE = intPreferencesKey("pref_subtitle_style")
         val KEY_AUTO_OVERLAY = booleanPreferencesKey("pref_auto_overlay")
         val KEY_OVERLAY_WIDTH = intPreferencesKey("pref_overlay_width_dp")
+        val KEY_ROLL_UP_HISTORY = intPreferencesKey("pref_roll_up_history")
         val KEY_TEXT_OUTLINE_SHADOW = booleanPreferencesKey("pref_text_outline_shadow")
         val KEY_TEXT_SHADOW_RADIUS = floatPreferencesKey("pref_text_shadow_radius")
     }
@@ -108,7 +111,10 @@ class SettingsRepository(context: Context) {
             subtitleLingerTimeSeconds = preferences[PreferencesKeys.KEY_LINGER_TIME] ?: d.subtitleLingerTimeSeconds,
             overlayOpacity = preferences[PreferencesKeys.KEY_OPACITY] ?: d.overlayOpacity,
             fontSizeSp = preferences[PreferencesKeys.KEY_FONT_SIZE] ?: d.fontSizeSp,
-            maxDisplayLines = preferences[PreferencesKeys.KEY_MAX_LINES] ?: d.maxDisplayLines,
+            maxDisplayLines = (preferences[PreferencesKeys.KEY_MAX_LINES] ?: d.maxDisplayLines)
+                .coerceIn(1, com.example.overlay.MAX_OVERLAY_LINES),
+            rollUpHistory = (preferences[PreferencesKeys.KEY_ROLL_UP_HISTORY] ?: d.rollUpHistory)
+                .coerceIn(com.example.overlay.ROLL_UP_HISTORY_CHOICES.first(), com.example.overlay.ROLL_UP_HISTORY_CHOICES.last()),
             showOriginalSpeech = preferences[PreferencesKeys.KEY_SHOW_ORIGINAL] ?: d.showOriginalSpeech,
             subtitleStyle = preferences[PreferencesKeys.KEY_SUBTITLE_STYLE]
                 ?: preferences[PreferencesKeys.KEY_MOVIE_STYLE]?.let { movie -> if (movie) 0 else 2 }
@@ -216,7 +222,8 @@ class SettingsRepository(context: Context) {
         lingerSeconds: Float,
         textShadow: Boolean,
         textShadowRadius: Float,
-        styleCode: Int
+        styleCode: Int,
+        rollUpHistory: Int
     ) {
         appContext.dataStore.edit {
             it[PreferencesKeys.KEY_FONT_SIZE] = fontSizeSp
@@ -227,7 +234,12 @@ class SettingsRepository(context: Context) {
             it[PreferencesKeys.KEY_TEXT_OUTLINE_SHADOW] = textShadow
             it[PreferencesKeys.KEY_TEXT_SHADOW_RADIUS] = textShadowRadius
             it[PreferencesKeys.KEY_SUBTITLE_STYLE] = styleCode
+            it[PreferencesKeys.KEY_ROLL_UP_HISTORY] = rollUpHistory
         }
+    }
+
+    suspend fun updateRollUpHistory(count: Int) {
+        appContext.dataStore.edit { it[PreferencesKeys.KEY_ROLL_UP_HISTORY] = count }
     }
 
     suspend fun updateAutoOverlay(enabled: Boolean) {
@@ -261,7 +273,8 @@ class SettingsRepository(context: Context) {
                 PreferencesKeys.KEY_MOVIE_STYLE,
                 PreferencesKeys.KEY_SUBTITLE_STYLE,
                 PreferencesKeys.KEY_AUTO_OVERLAY,
-                PreferencesKeys.KEY_OVERLAY_WIDTH
+                PreferencesKeys.KEY_OVERLAY_WIDTH,
+                PreferencesKeys.KEY_ROLL_UP_HISTORY
             ).forEach { preferences.remove(it) }
         }
     }

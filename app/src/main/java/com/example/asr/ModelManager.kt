@@ -330,7 +330,7 @@ class ModelManager(private val context: Context) {
             name = "Whisper Small",
             languageCode = "multi",
             languages = listOf("99 languages"),
-            description = "OpenAI Whisper Small. More accurate than Base for most languages, but about three times slower. For recent phones. 2022.",
+            description = "OpenAI Whisper Small. More accurate than Base, but about three times slower: on many phones it can't keep up with live speech, so subtitles lag. Try Base first. 2022.",
             downloadUrl = "$RELEASE_URL/sherpa-onnx-whisper-small.tar.bz2",
             totalSizeBytes = 639_387_718L,
             memoryMb = 375,
@@ -376,6 +376,18 @@ class ModelManager(private val context: Context) {
 
         // Whisper can be locked to any language code it knows; this marker means "any"
         val WHISPER_ANY_LANGUAGE = listOf("*")
+
+        // The languages Whisper knows (its two-letter codes). Some ML Kit languages, like Irish
+        // (ga) and Esperanto (eo), are not among them.
+        val WHISPER_LANGUAGE_CODES = setOf(
+            "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv",
+            "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no",
+            "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr",
+            "az", "sl", "kn", "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
+            "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu",
+            "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl",
+            "mg", "as", "tt", "haw", "ln", "ha", "ba", "jw", "su"
+        )
 
         // Silero speech detector used by Accuracy mode, stored in models/<VAD_DIR>/
         const val VAD_DIR = "_vad"

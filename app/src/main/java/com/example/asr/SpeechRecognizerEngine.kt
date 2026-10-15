@@ -32,7 +32,9 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 sealed class AsrUtteranceEvent {
-    data class Partial(val text: String, val utteranceId: Long = 0L, val timestamp: Long = System.currentTimeMillis()) : AsrUtteranceEvent()
+    // language: the language a whole-phrase model heard (null for streaming models), so drafts
+    // are translated from the right language too, not guessed from the text
+    data class Partial(val text: String, val utteranceId: Long = 0L, val timestamp: Long = System.currentTimeMillis(), val language: String? = null) : AsrUtteranceEvent()
     // language: two-letter code of the language the model heard (Accuracy mode), or null
     data class Final(val text: String, val utteranceId: Long = 0L, val timestamp: Long = System.currentTimeMillis(), val language: String? = null) : AsrUtteranceEvent()
 }
@@ -55,6 +57,12 @@ class SpeechRecognizerEngine(
 
     private val _engineState = MutableStateFlow<RecognizerState>(RecognizerState.NotReady)
     val engineState: StateFlow<RecognizerState> = _engineState.asStateFlow()
+
+    // True while the whole-phrase model takes longer to recognize phrases than they last, so
+    // subtitles fall behind and audio gets dropped (e.g. Whisper Small on many phones)
+    private val _isFallingBehind = MutableStateFlow(false)
+    val isFallingBehind: StateFlow<Boolean> = _isFallingBehind.asStateFlow()
+    private val slowModelWatch = SlowModelWatch()
 
     // Structured utterance event stream differentiating Partial (draft) and Final (committed)
     private val _utteranceFlow = MutableSharedFlow<AsrUtteranceEvent>(extraBufferCapacity = 64)
@@ -161,6 +169,11 @@ class SpeechRecognizerEngine(
         // (e.g. "N" + "どこで乗りますか" became "N Where do you ride").
         const val PENDING_FRAGMENT_MAX_AGE_MS = 1_200L
 
+        private val CUT_PIECE_ENDINGS = charArrayOf('.', '!', '?', '。', '．', '！', '？', '…')
+
+        /** Text of a piece cut mid-speech, without the sentence-ending mark the model added. */
+        fun trimCutPieceEnding(text: String): String = text.trimEnd().trimEnd(*CUT_PIECE_ENDINGS).trimEnd()
+
         /** Joins two pieces of recognized text: no space between CJK/Thai text, a space otherwise. */
         fun joinFragments(first: String, second: String): String {
             if (first.isEmpty()) return second
@@ -233,6 +246,8 @@ class SpeechRecognizerEngine(
 
     /** Called by the capture service right before it starts feeding audio. */
     fun beginCapture() {
+        slowModelWatch.reset()
+        _isFallingBehind.value = false
         activeCaptureSessions.incrementAndGet()
     }
 
@@ -390,7 +405,9 @@ class SpeechRecognizerEngine(
     private fun languageHintFor(model: AsrModelConfig): String? {
         val hint = spokenLanguageHint?.lowercase() ?: return null
         return when {
-            model.languageHints == ModelManager.WHISPER_ANY_LANGUAGE -> hint
+            // Only a language Whisper knows; otherwise it detects the language itself
+            model.languageHints == ModelManager.WHISPER_ANY_LANGUAGE ->
+                hint.takeIf { it in ModelManager.WHISPER_LANGUAGE_CODES }
             hint in model.languageHints -> hint
             else -> null
         }
@@ -420,6 +437,8 @@ class SpeechRecognizerEngine(
 
     /** Must hold [recognizerLock]. */
     private fun resetUtteranceState() {
+        slowModelWatch.reset()
+        _isFallingBehind.value = false
         _partialTextFlow.value = ""
         currentRawDraft = ""
         sentenceAssembler.clear()
@@ -611,10 +630,10 @@ class SpeechRecognizerEngine(
         return joinFragments(fragment, text)
     }
 
-    private fun emitPartialUtterance(draft: String, utteranceId: Long) {
+    private fun emitPartialUtterance(draft: String, utteranceId: Long, language: String? = null) {
         val trimmed = draft.trim()
         if (!SpeechValidator.isGenuineSpeech(trimmed)) return
-        utteranceEvents.trySend(AsrUtteranceEvent.Partial(trimmed, utteranceId = utteranceId))
+        utteranceEvents.trySend(AsrUtteranceEvent.Partial(trimmed, utteranceId = utteranceId, language = language))
     }
 
     /** Must hold [recognizerLock]. Accuracy mode: detect phrases, recognize, join, emit. */
@@ -623,7 +642,12 @@ class SpeechRecognizerEngine(
             _engineState.value = RecognizerState.Listening
             val phrases = phraseRecognizer.accept(samples)
             val now = System.currentTimeMillis()
-            phrases.forEach { handlePhrase(it, now) }
+            phrases.forEach {
+                _isFallingBehind.value = slowModelWatch.record(it.durationSec, it.decodeSec)
+                handlePhrase(it, now)
+            }
+            // Pieces were skipped because the model is slower than the speech
+            if (phraseRecognizer.takeSkippedCount() > 0) _isFallingBehind.value = true
             // A phrase cut at a comma waits briefly for the rest of its sentence
             phraseAssembler.onTick(now, isSpeaking = phraseRecognizer.isSpeaking)?.let { sentence ->
                 emitFinalUtterance(sentence.text, sentence.utteranceId, lastPhraseLanguage)
@@ -647,16 +671,26 @@ class SpeechRecognizerEngine(
             Log.d(TAG, "Dropped likely music/noise text: ${phrase.text}")
             return
         }
+        // A piece cut while the speaker kept talking: its full stop is the model's guess, not
+        // the end of the sentence, so it must not end the sentence
+        val piece = if (phrase.cutMidSpeech) trimCutPieceEnding(text) else text
+        if (piece.isBlank()) return
         phrase.language?.let { lastPhraseLanguage = it }
-        val utteranceId = currentUtteranceId
-        currentUtteranceId = utteranceEpochCounter.incrementAndGet()
-        val sentence = phraseAssembler.onPiece(text, utteranceId, now)
-        if (sentence.isFinal) {
-            emitFinalUtterance(sentence.text, sentence.utteranceId, lastPhraseLanguage)
-            _partialTextFlow.value = ""
-        } else {
-            // Shown as live text only; not sent for translation until the sentence is complete
-            _partialTextFlow.value = sentence.text
+        // Each sentence in the piece becomes its own subtitle (line, card and history entry);
+        // an unfinished last part waits for the rest of its sentence
+        for (part in SentenceAssembler.splitSentences(piece)) {
+            val utteranceId = currentUtteranceId
+            currentUtteranceId = utteranceEpochCounter.incrementAndGet()
+            val sentence = phraseAssembler.onPiece(part, utteranceId, now)
+            if (sentence.isFinal) {
+                emitFinalUtterance(sentence.text, sentence.utteranceId, lastPhraseLanguage)
+                _partialTextFlow.value = ""
+            } else {
+                // Translated right away as a draft, so subtitles show up every few seconds; the
+                // whole sentence replaces it once complete (and only that is saved to history)
+                _partialTextFlow.value = sentence.text
+                emitPartialUtterance(sentence.text, sentence.utteranceId, lastPhraseLanguage)
+            }
         }
     }
 

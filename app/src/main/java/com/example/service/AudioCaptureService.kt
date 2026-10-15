@@ -146,21 +146,26 @@ class AudioCaptureService : Service() {
             pipelineScope.launch {
                 var lastPartialDispatchTime = 0L
                 speechEngine.utteranceFlow.collect { event ->
-                    when (event) {
-                        is com.example.asr.AsrUtteranceEvent.Partial -> {
-                            val now = System.currentTimeMillis()
-                            if (now - lastPartialDispatchTime >= PARTIAL_DEBOUNCE_MS && SpeechValidator.isGenuineSpeech(event.text)) {
-                                lastPartialDispatchTime = now
-                                Log.d(PIPELINE_TAG, "Forwarding throttled partial draft (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
-                                translatorEngine.translateText(event.text, isFinal = false, utteranceId = event.utteranceId)
+                    // One bad event must not stop this collector: it runs once per process
+                    try {
+                        when (event) {
+                            is com.example.asr.AsrUtteranceEvent.Partial -> {
+                                val now = System.currentTimeMillis()
+                                if (now - lastPartialDispatchTime >= PARTIAL_DEBOUNCE_MS && SpeechValidator.isGenuineSpeech(event.text)) {
+                                    lastPartialDispatchTime = now
+                                    Log.d(PIPELINE_TAG, "Forwarding throttled partial draft (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
+                                    translatorEngine.translateText(event.text, isFinal = false, utteranceId = event.utteranceId, languageHint = event.language)
+                                }
+                            }
+                            is com.example.asr.AsrUtteranceEvent.Final -> {
+                                if (SpeechValidator.isGenuineSpeech(event.text) && speechEngine.isConfirmedAsrEvent(event.text)) {
+                                    Log.d(PIPELINE_TAG, "Forwarding confirmed Final utterance (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
+                                    translatorEngine.translateText(event.text, isFinal = true, utteranceId = event.utteranceId, languageHint = event.language)
+                                }
                             }
                         }
-                        is com.example.asr.AsrUtteranceEvent.Final -> {
-                            if (SpeechValidator.isGenuineSpeech(event.text) && speechEngine.isConfirmedAsrEvent(event.text)) {
-                                Log.d(PIPELINE_TAG, "Forwarding confirmed Final utterance (epoch=${event.utteranceId}) to translator: \"${event.text}\"")
-                                translatorEngine.translateText(event.text, isFinal = true, utteranceId = event.utteranceId, languageHint = event.language)
-                            }
-                        }
+                    } catch (e: Exception) {
+                        Log.e(PIPELINE_TAG, "Could not forward speech to the translator", e)
                     }
                 }
             }
@@ -347,7 +352,8 @@ class AudioCaptureService : Service() {
      */
     private fun startForegroundForMic() {
         val notification = NotificationHelper.buildCaptureNotification(this)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        // The microphone type exists from Android 11; Android 10 needs no type for the mic
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             startForeground(
                 NotificationHelper.NOTIFICATION_CAPTURE_ID,
                 notification,
@@ -754,7 +760,13 @@ class AudioCaptureService : Service() {
                     } catch (_: Exception) {}
                     try { debugRecorder?.close() } catch (_: Exception) {}
                     audioBufferChannel.close()
-                    speechEngine.flushCurrentSegment()
+                    // Must not throw out of this thread's cleanup (an uncaught exception here
+                    // would crash the app)
+                    try {
+                        speechEngine.flushCurrentSegment()
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "Could not flush the last speech", t)
+                    }
                     _liveAudioDb.value = 0f
                 }
             }

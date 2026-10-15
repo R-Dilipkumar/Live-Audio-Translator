@@ -108,6 +108,65 @@ class SentenceAssembler(
             "to", "of", "for", "with", "from", "my", "your"
         )
 
+        private val SPLIT_MARKS = setOf('.', '!', '?', '。', '！', '？', '．')
+        private val CJK_SPLIT_MARKS = setOf('。', '！', '？', '．')
+        // Words that end in a full stop without ending the sentence
+        private val ABBREVIATIONS = setOf(
+            "mr", "mrs", "ms", "dr", "st", "jr", "sr", "prof", "vs", "etc", "mt", "no", "fig", "approx", "e.g", "i.e"
+        )
+
+        /**
+         * Splits [text] after each sentence end (. ! ? 。 ！ ？), so every sentence can be its
+         * own subtitle. The last part may be unfinished. Not split: "...", "Mr. Smith", "J. K.",
+         * "3.5", "e.g. this", or a full stop followed by a lowercase word.
+         */
+        fun splitSentences(text: String): List<String> {
+            val parts = mutableListOf<String>()
+            var start = 0
+            var i = 0
+            while (i < text.length) {
+                val mark = text[i]
+                if (mark !in SPLIT_MARKS) {
+                    i++
+                    continue
+                }
+                // A run like "?!" goes together, with any closing quote or bracket after it
+                var end = i + 1
+                while (end < text.length && text[end] in SPLIT_MARKS) end++
+                val isEllipsis = text.substring(i, end).count { it == '.' } >= 2
+                while (end < text.length && text[end] in CLOSING_MARKS) end++
+                val next = text.substring(end).firstOrNull { !it.isWhitespace() }
+                val splits = when {
+                    next == null -> false // nothing follows
+                    isEllipsis -> false // "I am..." trails off into what follows
+                    mark in CJK_SPLIT_MARKS -> true
+                    !text[end].isWhitespace() -> false // "3.5", "U.S."
+                    mark == '.' && endsWithAbbreviation(text.substring(start, i)) -> false
+                    else -> !next.isLowerCase()
+                }
+                if (splits) {
+                    parts += text.substring(start, end).trim()
+                    start = end
+                }
+                i = end
+            }
+            text.substring(start).trim().takeIf { it.isNotEmpty() }?.let { parts += it }
+            // A part with no words (a stray "!") stays with the part before it
+            return parts.fold(mutableListOf()) { merged, part ->
+                if (merged.isNotEmpty() && part.none { it.isLetterOrDigit() }) {
+                    merged[merged.lastIndex] = merged.last() + part
+                } else {
+                    merged += part
+                }
+                merged
+            }
+        }
+
+        private fun endsWithAbbreviation(textBeforeMark: String): Boolean {
+            val word = textBeforeMark.trimEnd().substringAfterLast(' ').trimStart('(', '"', '\'').lowercase()
+            return (word.length == 1 && word[0].isLetter()) || word in ABBREVIATIONS
+        }
+
         fun looksComplete(text: String): Boolean {
             val core = text.trim().trimEnd(*CLOSING_MARKS)
             if (core.isEmpty()) return false

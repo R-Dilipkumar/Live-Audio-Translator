@@ -211,7 +211,7 @@ fun LatencyPreference(
             text = if (mode == RecognitionMode.SPEED) {
                 "Words appear while they are spoken. Quickest, but mishears more."
             } else {
-                "Text appears when the speaker pauses, with punctuation and far fewer mistakes. Whole sentences are translated."
+                "Text appears sentence by sentence, usually within a few seconds, with punctuation and far fewer mistakes."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

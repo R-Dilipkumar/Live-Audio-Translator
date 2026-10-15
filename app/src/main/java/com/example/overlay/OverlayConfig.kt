@@ -70,6 +70,13 @@ enum class SubtitleStyle(val code: Int) {
     }
 }
 
+/** Most subtitle lines the window can show at once. */
+const val MAX_OVERLAY_LINES = 8
+
+/** Choices for how many past subtitles Roll-up keeps for scrolling back. */
+val ROLL_UP_HISTORY_CHOICES = listOf(10, 25, 50, 100, 200)
+const val DEFAULT_ROLL_UP_HISTORY = 50
+
 // All fields are vals of stable types; marking it lets Compose skip SubtitleOverlay when unchanged
 @Immutable
 data class OverlaySettings(
@@ -79,7 +86,7 @@ data class OverlaySettings(
     val showOriginal: Boolean = true,
     val isPaused: Boolean = false,
     val isLocked: Boolean = false,
-    val maxSubtitleLines: Int = 2, // 1 to 4 visible lines
+    val maxSubtitleLines: Int = 2, // 1 to MAX_OVERLAY_LINES visible lines
     val maxLines: Int = maxSubtitleLines, // Backwards compatibility alias
     val lingerTimeSeconds: Float = 3.5f, // 1.0s to 10.0s, or 0f for 'Keep on Screen'
     val isTextOutlineShadowEnabled: Boolean = true,
@@ -88,5 +95,7 @@ data class OverlaySettings(
     // Window width chosen by resizing, in dp; 0 = automatic
     val widthDp: Int = 0,
     // Accuracy recognition mode: subtitles arrive per phrase and stay up longer
-    val isAccuracyMode: Boolean = false
+    val isAccuracyMode: Boolean = false,
+    // Roll-up style: how many past subtitles are kept to scroll back to (upper limit)
+    val rollUpHistory: Int = DEFAULT_ROLL_UP_HISTORY
 )
